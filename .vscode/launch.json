@@ -1,0 +1,20 @@
+{
+  {
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Streamlit App",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "${file}",
+                "--server.port",
+                "8502"
+            ],
+            "jinja": true,
+            "justMyCode": true
+        }
+    ]
+}
