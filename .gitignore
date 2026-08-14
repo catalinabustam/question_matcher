@@ -1,0 +1,7 @@
+ARC_Lists/
+arc_index_bm25/
+chromadb_data/
+graf/
+.env
+.vscode/
+__pycache__/
