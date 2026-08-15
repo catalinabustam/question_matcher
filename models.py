@@ -17,10 +17,10 @@ class Question:
     """A question coming from a CSV (source or reference)."""
     row_index: int
     question: str
+    question_id: str
     section: Optional[str] = None
     definition: Optional[str] = None
     options: Optional[str] = None
-    question_id: Optional[str] = None
     translated_question: Optional[str] = None
     translated_definition: Optional[str] = None
     topic: Optional[str] = None

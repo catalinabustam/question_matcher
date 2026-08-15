@@ -26,6 +26,11 @@ Extra features on top of the base matching flow:
   post-filter on top of hybrid retrieval, so the (expensive) similarity
   computation is done once per question regardless of the filter — see
   `matching_service.QuestionMatchingService.find_candidates`.
+- Data dictionary export: alongside the plain result CSV, a second download
+  button builds a REDCap-style data dictionary (see `datadictionary.py`,
+  ported from `generate.py`) from the original ARC catalog rows of every
+  MATCHED question. Ignored and newly created questions are skipped, since
+  they have no ARC row to build a dictionary entry from.
 """
 import hashlib
 import os
@@ -37,6 +42,7 @@ import io
 
 from bm25 import create_bm25_retriever
 from csv_io import QuestionCsvRepository
+from datadictionary import build_data_dictionary
 from matching_service import QuestionMatchingService
 from models import MatchDecision, MatchStatus
 from rules import build_new_question
@@ -113,14 +119,15 @@ def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = Fa
 
 def _candidate_label(candidate) -> str:
     return (f"{candidate.question.question}  ·  section: {candidate.question.section or '—'}"
-            f"  ·  similarity: {candidate.score:.0%}")
+            f"  ·  score: {candidate.score:.0%}")
 
 
 # --------------------------------------------------------------------------- #
 # Session state handling
 # --------------------------------------------------------------------------- #
 
-def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame):
+def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
+                   arc_catalog_df: pd.DataFrame):
     st.session_state.source_questions = source_qs
     st.session_state.decisions = [MatchDecision(source=q) for q in source_qs]
     st.session_state.matcher = matcher
@@ -130,11 +137,16 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     # fields) so we can look up every original column by `row_index` — used
     # by both the "show full ARC row" button and the sidebar column filter.
     st.session_state.reference_df = reference_df
+    # The *original*, non-expanded ARC catalog (one row per Variable), kept
+    # separately so the data dictionary export can look up rows for
+    # variables that only show up in someone else's branching logic — see
+    # `datadictionary.build_data_dictionary`.
+    st.session_state.arc_catalog_df = arc_catalog_df
 
 
 def _reset_session():
     for key in ("source_questions", "decisions", "matcher", "current_idx", "flow_started",
-                "reference_df", "arc_filter_columns", "allowed_row_indices"):
+                "reference_df", "arc_catalog_df", "arc_filter_columns", "allowed_row_indices"):
         st.session_state.pop(key, None)
 
 
@@ -410,6 +422,25 @@ def _render_question_flow():
         st.rerun()
 
 
+def _matched_arc_rows() -> pd.DataFrame:
+    """Original ARC catalog rows for every MATCHED decision.
+
+    Ignored and newly created questions have no corresponding ARC catalog
+    row, so they're excluded here — only matches can produce a data
+    dictionary entry (Type, Answer Options, Validation, etc. all come from
+    the matched ARC row, not from the source question).
+    """
+    reference_df = st.session_state.reference_df
+    arc_catalog_df = st.session_state.arc_catalog_df
+    matched_row_question_ids = [
+        decision.matched.question_id
+        for decision in st.session_state.decisions
+        if decision.status == MatchStatus.MATCHED and decision.matched
+    ]
+
+    return arc_catalog_df[arc_catalog_df["Variable"].isin(matched_row_question_ids)]
+
+
 def _render_export():
     st.divider()
     st.subheader("4. Export result")
@@ -419,6 +450,15 @@ def _render_export():
     csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("⬇ Download result CSV", csv_bytes,
                         file_name="matched_questions.csv", mime="text/csv")
+
+    st.markdown("**Data dictionary (REDCap format)**")
+    st.caption("Built only from matched questions, using their original ARC catalog "
+               "row — ignored and newly created questions are excluded.")
+    data_dictionary_df = build_data_dictionary(_matched_arc_rows(), st.session_state.arc_catalog_df)
+    dictionary_bytes = data_dictionary_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⬇ Download data dictionary CSV", dictionary_bytes,
+                        file_name="datadictionary.csv", mime="text/csv",
+                        disabled=data_dictionary_df.empty)
 
 
 # --------------------------------------------------------------------------- #
@@ -482,9 +522,10 @@ def main():
                     ids=ids,
                     bm25_retriever=bm25_retriever,
                     stemmer=stemmer,
+                    arc_pd=reference_df
                 )
 
-                _init_session(source_qs, matcher, df_expanded)
+                _init_session(source_qs, matcher, df_expanded, reference_df)
                 st.rerun()
         else:
             st.info("Upload the CSV to process and the reference CSV in the sidebar to get started.")

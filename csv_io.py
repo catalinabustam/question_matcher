@@ -11,7 +11,7 @@ class QuestionCsvRepository:
 
     @staticmethod
     def load(df: pd.DataFrame, question_col: str,  definition_col: str, section_col: Optional[str],
-              options_col: Optional[str], id_col: Optional[str],
+              options_col: Optional[str], id_col: str,
               topic_col: Optional[str] = None,
               answer_type_col: Optional[str] = None) -> List[Question]:
         questions = []

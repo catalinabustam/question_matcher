@@ -22,7 +22,7 @@ class QuestionMatchingService:
     """Finds the best reference candidates for a given source question."""
 
     def __init__(self, reference: List[Question], collection_questions, collection_ques_def,
-                 documents: List[str], ids: List[str], bm25_retriever, stemmer):
+                 documents: List[str], ids: List[str], bm25_retriever, stemmer, arc_pd):
         """
         Parameters
         ----------
@@ -105,6 +105,7 @@ class QuestionMatchingService:
                 continue
             if allowed_row_indices is not None and ref_index not in allowed_row_indices:
                 continue
+
             ref = self._reference[ref_index]
             candidates.append(MatchCandidate(question=ref, score=result["normalized_score"]))
             if len(candidates) >= top_n:
