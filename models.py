@@ -1,7 +1,7 @@
 """Domain models for questionnaire comparison."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 
 class MatchStatus(str, Enum):
@@ -40,8 +40,17 @@ class MatchDecision:
     source: Question
     status: MatchStatus = MatchStatus.PENDING
     matched: Optional[Question] = None
+    matches: List[Question] = field(default_factory=list)
     new_section: str = ""
     new_text: str = ""
     new_id: str = ""
     edited_translated_question: str = ""
     edited_translated_definition: str = ""
+
+    @property
+    def matched_questions(self) -> List[Question]:
+        if self.matches:
+            return self.matches
+        if self.matched:
+            return [self.matched]
+        return []

@@ -4,7 +4,7 @@ import os
 import chromadb
 from chromadb.utils import embedding_functions
 import pandas as pd
-
+import re
 
 def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.DataFrame:
     """Expand the ARC DataFrame by replacing user list questions with individual items from the corresponding CSV files.
@@ -22,7 +22,7 @@ def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.D
         question_type = str(row["Type"]).strip().lower()
         base_question = str(row["Question"]).strip()
 
-        if question_type == "user_list" and pd.notna(row["List"]):
+        if question_type in  ["user_list", "multilist"] and pd.notna(row["List"]):
             list_identifier = str(row["List"]).strip()
 
             folder, file_name = list_identifier.split("_", 1)
@@ -35,12 +35,22 @@ def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.D
                 # Duplicate the full row and update only the question column
                 for item in items:
                     new_row = row.copy()
-                    new_row["Question"] = f"{base_question},  {file_name}: {item}"
+                    new_row["Question"] = f"{base_question}, {file_name}: {item}"
                     expanded_rows.append(new_row)
             else:
                 print(f"Warning: List file '{file_path}' not found. Skipping expansion for this row.")
                 expanded_rows.append(row)  # Keep the original row if the list file is missing
-        else:
+        elif question_type in ["radio", "checkbox"]:
+
+            options = str(row["Answer Options"]).split('|')
+            cleaned_options = [res for s in options 
+                               if (res := re.sub(r"\d+|,|unknown|yes|no", "", s, flags=re.IGNORECASE).strip())]
+
+            options_to_add = ", Options: " + ", ".join(cleaned_options) if len(cleaned_options) > 0 else ''
+            row["Question"] = row["Question"] + options_to_add
+
+            expanded_rows.append(row) 
+        else:    
             expanded_rows.append(row)  # Keep the original row if not a list type or List column is NaN
 
     return pd.DataFrame(expanded_rows).reset_index(drop=True)
