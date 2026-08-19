@@ -8,23 +8,20 @@ Flow:
 3. A final CSV is exported with the original question, the matched one (if
    any), and/or the newly built question. Ignored questions are left out.
 """
-import hashlib
 import os
 
 import pandas as pd
 import streamlit as st
-import requests
-import io
 
-from bm25 import create_bm25_retriever
+from bm25 import load_bm25_retriever
 from csv_io import QuestionCsvRepository
-from datadictionary import build_data_dictionary
+from datadictionary import build_data_dictionary, _KEPT_FIELD_TYPES
 from matching_service import QuestionMatchingService
 from models import MatchDecision, MatchStatus
 from rules import build_new_question
 from translate import DeepLTranslator, translate_questions
 from dotenv import load_dotenv
-from vector_db import create_chromadb_collections
+from vector_db import EMBEDDING_MODEL, INDEX_DATA_DIR, build_documents, build_ids, load_chromadb_collections
 
 AUTO_DETECT = "Auto-detect"
 DEEPL_LANGUAGES = ["ES", "EN-US", "EN-GB", "PT-BR", "PT-PT", "FR", "DE", "IT", "CA"]
@@ -34,8 +31,6 @@ st.set_page_config(page_title="Question Matcher", layout="wide")
 NONE_OPTION = "— None —"
 CREATE_NEW_LABEL = "➕ No match: create a new question"
 IGNORE_LABEL = "🚫 Ignore this question (do not include in export)"
-
-EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 
 # Pagination over the candidate list: show this many at first, grow by this
 # many per "Load more" click, up to this hard cap.
@@ -49,29 +44,42 @@ load_dotenv(override=True)
 # --------------------------------------------------------------------------- #
 
 
-@st.cache_data(show_spinner="Downloading the ARC reference catalog...")
-def _download_last_arc() -> pd.DataFrame:
-    url = "https://raw.githubusercontent.com/ISARICResearch/ARC/refs/heads/main/ARC.csv"
-    response = requests.get(url, timeout=(3.05, 10))
-    response.raise_for_status()
-    return pd.read_csv(io.StringIO(response.text))
+@st.cache_resource(show_spinner="Loading the reference catalog and search index...")
+def _load_index():
+    """Load the ARC index built ahead of time by `build_index.py`.
 
+    The app never builds the ChromaDB collections or the BM25 index itself
+    anymore — that's a separate, explicit step (`python build_index.py`)
+    run only when the ARC catalog needs to be (re)downloaded and (re)indexed.
+    This just reads back the already-built artifacts:
 
-@st.cache_resource(show_spinner="Building the hybrid search index over the reference catalog (only happens once)...")
-def _create_collections_and_index(arc_df: pd.DataFrame, lists_path: str = "ARC_Lists/",
-                                   model_name: str = EMBEDDING_MODEL):
-    """Build the ChromaDB collections and the BM25 index exactly once per app run.
+    - `index_data/arc_raw.csv` / `arc_expanded.csv` — the reference tables.
+    - the ChromaDB collections persisted under `chromadb_data/`.
+    - the BM25 index persisted under `arc_index_bm25/`.
 
-    `st.cache_resource` (not `st.cache_data`) is used deliberately: the return
-    values here are live resources (Chroma collections, a BM25 retriever) that
-    aren't meaningfully picklable/copyable the way `st.cache_data` expects —
-    `cache_resource` caches them by reference instead, and only recomputes if
-    `arc_df` actually changes.
+    `documents`/`ids` aren't persisted separately; they're rebuilt
+    deterministically from `df_expanded` (see `vector_db.build_documents`/
+    `build_ids`), which guarantees they always match what the on-disk
+    collections/BM25 index were actually built from.
+
+    Raises a clear, actionable error if the index hasn't been built yet.
     """
-    collection_questions, collection_ques_def, documents, ids, df_expanded = create_chromadb_collections(
-        arc_df, lists_path=lists_path, model_name=model_name)
-    bm25_retriever, stemmer = create_bm25_retriever(documents, index_path="arc_index_bm25")
-    return collection_questions, collection_ques_def, documents, ids, bm25_retriever, stemmer, df_expanded
+    if not (INDEX_DATA_DIR / "arc_expanded.csv").exists():
+        raise RuntimeError(
+            "No reference index found. Build it first by running: python build_index.py"
+        )
+
+    reference_df = pd.read_csv(INDEX_DATA_DIR / "arc_raw.csv", dtype=str).fillna("")
+    df_expanded = pd.read_csv(INDEX_DATA_DIR / "arc_expanded.csv", dtype=str).fillna("")
+
+    documents = build_documents(df_expanded)
+    ids = build_ids(df_expanded)
+
+    collection_questions, collection_ques_def = load_chromadb_collections(EMBEDDING_MODEL)
+    bm25_retriever, stemmer = load_bm25_retriever()
+
+    return (reference_df, df_expanded, collection_questions, collection_ques_def,
+            documents, ids, bm25_retriever, stemmer)
 
 
 def _read_csv(uploaded_file, separator: str) -> pd.DataFrame:
@@ -496,14 +504,13 @@ def main():
 
     if not st.session_state.get("flow_started"):
         if source_file:
+                (reference_df, df_expanded, collection_questions, collection_ques_def,
+                 documents, ids, bm25_retriever, stemmer) = _load_index()
+            except RuntimeError as exc:
+                st.error(str(exc))
+                return
+
             source_df = _read_csv(source_file, separator)
-            reference_df = _download_last_arc()
-            # Built ONCE (st.cache_resource keyed on reference_df): the embedding
-            # model load, the embedding of the whole catalog, and the BM25
-            # indexing all happen a single time here, no matter how many times
-            # the script re-runs while the user picks column mappings below.
-            (collection_questions, collection_ques_def, documents, ids,
-             bm25_retriever, stemmer, df_expanded) = _create_collections_and_index(reference_df)
 
             st.markdown("### Column mapping")
             col_a, col_b = st.columns(2)
