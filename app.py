@@ -7,30 +7,6 @@ Flow:
    or creates a new question following the fixed rules in `rules.py`.
 3. A final CSV is exported with the original question, the matched one (if
    any), and/or the newly built question. Ignored questions are left out.
-
-Extra features on top of the base matching flow:
-- Paginated candidates: only the top 5 suggested matches are shown at first;
-  a "Load more questions" button reveals the next 5 (up to 50 total),
-  without re-running the (expensive) similarity search — see the pagination
-  note in `_render_question_flow`.
-- "Ignore / do not include" option: lets the user skip a question entirely
-  so it's excluded from the final export, instead of forcing a match or a
-  new-question creation for every row.
-- "Show full ARC row" button next to the candidate picker: reveals every
-  column of the original (expanded) ARC catalog row for whichever candidate
-  is currently selected, not just the mapped fields (question/definition/
-  section/etc).
-- Sidebar candidate filter: restrict which ARC rows are eligible to be
-  suggested as matches, by any column(s) in the ARC file (e.g. only show
-  candidates where Body System = Respiratory). The filter is applied as a
-  post-filter on top of hybrid retrieval, so the (expensive) similarity
-  computation is done once per question regardless of the filter — see
-  `matching_service.QuestionMatchingService.find_candidates`.
-- Data dictionary export: alongside the plain result CSV, a second download
-  button builds a REDCap-style data dictionary (see `datadictionary.py`,
-  ported from `generate.py`) from the original ARC catalog rows of every
-  MATCHED question. Ignored and newly created questions are skipped, since
-  they have no ARC row to build a dictionary entry from.
 """
 import hashlib
 import os
@@ -63,7 +39,6 @@ EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 
 # Pagination over the candidate list: show this many at first, grow by this
 # many per "Load more" click, up to this hard cap.
-CANDIDATES_PAGE_SIZE = 5
 CANDIDATES_MAX = 50
 
 load_dotenv(override=True)
@@ -123,8 +98,46 @@ def _candidate_label(candidate) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Session state handling
+# Session state handling & Callbacks
 # --------------------------------------------------------------------------- #
+
+def _on_status_change(idx: int, trigger: str, num_candidates: int):
+    """Callback triggered when Ignore or Create New checkbox state changes."""
+    ignore_key = f"ignore_{idx}"
+    create_new_key = f"create_new_{idx}"
+
+    if trigger == "ignore" and st.session_state.get(ignore_key):
+        st.session_state[create_new_key] = False
+        
+        # Clear candidate selections
+        for i in range(num_candidates):
+            st.session_state[f"candidate_{idx}_{i}"] = False
+
+        # Automatically save decision as IGNORED and move to the next question
+        _save_decision(idx, selected_labels=[], candidates=[], new_section="", new_text="", ignore=True)
+        
+        total = len(st.session_state.source_questions)
+        if st.session_state.current_idx < total - 1:
+            st.session_state.current_idx += 1
+
+
+    elif trigger == "create_new" and st.session_state.get(create_new_key):
+        st.session_state[ignore_key] = False
+        
+        # Clear candidate selections
+        for i in range(num_candidates):
+            st.session_state[f"candidate_{idx}_{i}"] = False
+
+
+def _on_candidate_change(idx: int):
+    """Callback triggered when any candidate checkbox state changes."""
+    ignore_key = f"ignore_{idx}"
+    create_new_key = f"create_new_{idx}"
+    
+    # If any candidate gets checked, clear Ignore and Create New
+    st.session_state[ignore_key] = False
+    st.session_state[create_new_key] = False
+
 
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
                    arc_catalog_df: pd.DataFrame):
@@ -133,14 +146,9 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     st.session_state.matcher = matcher
     st.session_state.current_idx = 0
     st.session_state.flow_started = True
-    # Full expanded ARC dataframe, kept around (not just the mapped `Question`
-    # fields) so we can look up every original column by `row_index` — used
-    # by both the "show full ARC row" button and the sidebar column filter.
+    
     st.session_state.reference_df = reference_df
-    # The *original*, non-expanded ARC catalog (one row per Variable), kept
-    # separately so the data dictionary export can look up rows for
-    # variables that only show up in someone else's branching logic — see
-    # `datadictionary.build_data_dictionary`.
+  
     st.session_state.arc_catalog_df = arc_catalog_df
 
 
@@ -150,25 +158,31 @@ def _reset_session():
         st.session_state.pop(key, None)
 
 
-def _save_decision(idx: int, choice_label: str, candidates, new_section: str, new_text: str):
+def _save_decision(idx: int, selected_labels: list[str], candidates, new_section: str,
+                  new_text: str, create_new: bool = False, ignore: bool = False):
     decision = st.session_state.decisions[idx]
-    if choice_label == CREATE_NEW_LABEL:
+    if create_new:
         sequence = sum(1 for d in st.session_state.decisions
                         if d.status == MatchStatus.CREATED) + 1
         new_id, default_section, default_text = build_new_question(decision.source, sequence)
         decision.status = MatchStatus.CREATED
         decision.matched = None
+        decision.matches = []
         decision.new_id = new_id
         decision.new_section = new_section or default_section
         decision.new_text = new_text or default_text
-    elif choice_label == IGNORE_LABEL:
+    elif ignore:
         decision.status = MatchStatus.IGNORED
         decision.matched = None
+        decision.matches = []
         decision.new_id = decision.new_section = decision.new_text = ""
     else:
-        matched = next(c.question for c in candidates if _candidate_label(c) == choice_label)
+        matched_questions = [
+            c.question for c in candidates if _candidate_label(c) in selected_labels
+        ]
         decision.status = MatchStatus.MATCHED
-        decision.matched = matched
+        decision.matched = matched_questions[0] if matched_questions else None
+        decision.matches = matched_questions
         decision.new_id = decision.new_section = decision.new_text = ""
 
 
@@ -288,12 +302,12 @@ def _render_question_flow():
     source = st.session_state.source_questions[idx]
     decision = st.session_state.decisions[idx]
 
-    st.subheader(f"Question {idx + 1} of {total}")
+    st.markdown(f"**Question {idx + 1} of {total}**")
     with st.container(border=True):
-        st.markdown(f"**Section:** {source.section or '—'}"
-                    f"  ·  **Answer type:** {source.answer_type or '—'}")
-        st.markdown(f"**Original question:** {source.question}")
-        st.markdown(f"**Original definition:** {source.definition}") 
+        st.markdown(f"**Original question:** {source.question}"
+                    f"  ·  **Original definition:** {source.definition or '—'}")
+        st.markdown(f"**Section:** {source.section or '—'}" 
+                    f"  ·  **Answer type:** {source.answer_type or '—'}") 
         if source.options:
             st.markdown(f"**Options:** {source.options}")
 
@@ -304,12 +318,14 @@ def _render_question_flow():
         translated_question_input = st.text_area(
             "Translated question (editable)", value=default_translation_question,
             key=f"translated_edit_{idx}",
+            height=68,
             help="Edit the text if the automatic translation isn't quite right, "
-                 "then click 'Recalculate similarity' to refresh the suggested matches.",
+                 "then click 'Recalculate similarity' to refresh the suggested matches.",    
         )
         translated_definition_input = st.text_area(
                     "Translated definition (editable)", value=default_translation_definition,
                     key=f"translated_def_edit_{idx}",
+                    height=68,
                     help="Edit the text if the automatic translation isn't quite right, "
                          "then click 'Recalculate similarity' to refresh the suggested matches.",
                 )
@@ -322,8 +338,6 @@ def _render_question_flow():
     override_definition = getattr(decision, "edited_translated_definition", "") or None
 
     # Fetch up to CANDIDATES_MAX candidates once (already sorted best-first).
-    # Pagination below only changes how many of these are *displayed* — it
-    # never re-runs the (expensive) hybrid retrieval.
     candidates = st.session_state.matcher.find_candidates(
         source, top_n=CANDIDATES_MAX,
         override_question=override_question,
@@ -331,73 +345,71 @@ def _render_question_flow():
         allowed_row_indices=st.session_state.get("allowed_row_indices"),
     )
 
-    loaded_key = f"loaded_count_{idx}"
-    if loaded_key not in st.session_state:
-        st.session_state[loaded_key] = CANDIDATES_PAGE_SIZE
-    # If a previously saved match sits further down the ranked list than
-    # what's currently loaded, expand the page so it's visible/selected when
-    # navigating back to this question.
-    if decision.status == MatchStatus.MATCHED and decision.matched:
-        matched_position = next((i for i, c in enumerate(candidates)
-                                  if c.question.row_index == decision.matched.row_index), None)
-        if matched_position is not None and matched_position >= st.session_state[loaded_key]:
-            st.session_state[loaded_key] = min(matched_position + 1, len(candidates))
-
-    loaded_count = min(st.session_state[loaded_key], len(candidates))
-    visible_candidates = candidates[:loaded_count]
-
-    labels = [IGNORE_LABEL] + [_candidate_label(c) for c in visible_candidates] + [CREATE_NEW_LABEL]
+    num_candidates = len(candidates)
+    visible_labels = [_candidate_label(c) for c in candidates]
 
     if not candidates:
         st.warning("No reference questions match the current filter. "
-                    "Adjust the filter in the sidebar, ignore this question, or create a new one.")
+                   "Adjust the filter in the sidebar, ignore this question, or create a new one.")
+    
+    default_selected = set()
+    if decision.status == MatchStatus.MATCHED:
+        default_selected = {
+            _candidate_label(c) for c in candidates
+            if any(matched.row_index == c.question.row_index for matched in decision.matched_questions)
+        }
+    elif decision.status == MatchStatus.PENDING and candidates:
+        default_selected = {visible_labels[0]}
 
-    default_index = 0  # IGNORE_LABEL
-    if decision.status == MatchStatus.CREATED:
-        default_index = len(labels) - 1
-    elif decision.status == MatchStatus.IGNORED:
-        default_index = 0
-    elif decision.status == MatchStatus.MATCHED and decision.matched:
-        for i, c in enumerate(visible_candidates):
-            if c.question.row_index == decision.matched.row_index:
-                default_index = i + 1  # +1 to account for IGNORE_LABEL at position 0
-                break
-    elif decision.status == MatchStatus.PENDING and visible_candidates:
-        default_index = 1  # default to the top suggested match, not "ignore"
+    # Initialize keys in st.session_state before rendering widgets
+    ignore_key = f"ignore_{idx}"
+    if ignore_key not in st.session_state:
+        st.session_state[ignore_key] = decision.status == MatchStatus.IGNORED
 
-    choice = st.radio("Select a match, ignore, or create a new question",
-                       labels, index=default_index, key=f"choice_{idx}")
+    create_new_key = f"create_new_{idx}"
+    if create_new_key not in st.session_state:
+        st.session_state[create_new_key] = decision.status == MatchStatus.CREATED
 
-    if loaded_count < len(candidates):
-        if st.button(f"⬇ Load more questions ({loaded_count} of {len(candidates)} shown)",
-                     key=f"load_more_{idx}"):
-            st.session_state[loaded_key] = min(loaded_count + CANDIDATES_PAGE_SIZE, len(candidates))
-            st.rerun()
+    ignore = st.checkbox(
+        IGNORE_LABEL,
+        key=ignore_key,
+        on_change=_on_status_change,
+        args=(idx, "ignore", num_candidates),
+    )
 
-    # Show the full original ARC row (every column, not just the mapped
-    # fields) for whichever candidate is currently selected.
-    selected_row_index = None
-    if choice not in (CREATE_NEW_LABEL, IGNORE_LABEL):
-        for c in visible_candidates:
-            if _candidate_label(c) == choice:
-                selected_row_index = c.question.row_index
-                break
+    selected_match_labels = []
+    with st.container(height=300):
+        for i, candidate in enumerate(candidates):
+            label = _candidate_label(candidate)
+            key = f"candidate_{idx}_{i}"
 
-    if selected_row_index is not None:
-        show_key = f"show_arc_row_{idx}"
-        if st.button("🔍 Show full ARC row", key=f"btn_{show_key}"):
-            st.session_state[show_key] = not st.session_state.get(show_key, False)
+            if key not in st.session_state:
+                st.session_state[key] = label in default_selected
 
-        if st.session_state.get(show_key, False):
-            arc_row = st.session_state.reference_df.loc[selected_row_index]
-            with st.expander("Full ARC catalog row", expanded=True):
-                st.dataframe(
-                    arc_row.astype(str).rename("Value"),
-                    use_container_width=True,
-                )
+            checkbox_col, action_col = st.columns([6, 2])
+            checked = checkbox_col.checkbox(
+                label,
+                key=key,
+                on_change=_on_candidate_change,
+                args=(idx,),
+            )
+            if checked:
+                selected_match_labels.append(label)
+
+            with action_col:
+                with st.popover("View full ARC row"):
+                    arc_row = st.session_state.reference_df.loc[candidate.question.row_index]
+                    st.dataframe(arc_row.astype(str).rename("Value"), use_container_width=True)
+       
+    create_new = st.checkbox(
+        CREATE_NEW_LABEL,
+        key=create_new_key,
+        on_change=_on_status_change,
+        args=(idx, "create_new", num_candidates),
+    )
 
     new_section = new_text = ""
-    if choice == CREATE_NEW_LABEL:
+    if create_new:
         preview_seq = sum(1 for d in st.session_state.decisions
                            if d.status == MatchStatus.CREATED) + 1
         preview_id, default_section, default_text = build_new_question(source, preview_seq)
@@ -405,15 +417,20 @@ def _render_question_flow():
                                      value=decision.new_section or default_section, key=f"sec_{idx}")
         new_text = st.text_area("New question text",
                                  value=decision.new_text or default_text, key=f"text_{idx}")
-    elif choice == IGNORE_LABEL:
+    elif ignore:
         st.caption("This question will be excluded from the final export.")
+
+    can_save = bool(selected_match_labels) or create_new or ignore
+    if not can_save:
+        st.caption("Select one or more candidates, choose a new question, or ignore this row.")
 
     nav_cols = st.columns([1, 1, 1, 5])
     if nav_cols[0].button("⬅ Previous", disabled=idx == 0):
         st.session_state.current_idx = max(0, idx - 1)
         st.rerun()
-    if nav_cols[1].button("Save and continue ➡", type="primary"):
-        _save_decision(idx, choice, visible_candidates, new_section, new_text)
+    if nav_cols[1].button("Save and continue ➡", type="primary", disabled=not can_save):
+        _save_decision(idx, selected_match_labels, candidates, new_section, new_text,
+                       create_new=create_new, ignore=ignore)
         if idx < total - 1:
             st.session_state.current_idx = idx + 1
         st.rerun()
@@ -432,11 +449,13 @@ def _matched_arc_rows() -> pd.DataFrame:
     """
     reference_df = st.session_state.reference_df
     arc_catalog_df = st.session_state.arc_catalog_df
-    matched_row_question_ids = [
-        decision.matched.question_id
-        for decision in st.session_state.decisions
-        if decision.status == MatchStatus.MATCHED and decision.matched
-    ]
+    matched_row_question_ids = []
+    for decision in st.session_state.decisions:
+        if decision.status != MatchStatus.MATCHED:
+            continue
+        for matched in decision.matched_questions:
+            if matched.question_id:
+                matched_row_question_ids.append(matched.question_id)
 
     return arc_catalog_df[arc_catalog_df["Variable"].isin(matched_row_question_ids)]
 
