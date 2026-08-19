@@ -9,3 +9,4 @@ __pycache__/
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
 .DS_Store
+/index_data

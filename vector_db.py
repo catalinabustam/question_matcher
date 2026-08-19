@@ -1,10 +1,33 @@
-"""Build the ChromaDB dense collections used for hybrid retrieval."""
+"""Build (and load) the ChromaDB dense collections used for hybrid retrieval.
+
+Building the collections is the expensive step (loading the embedding
+model, embedding the whole ARC catalog) and is meant to run exactly once,
+from the standalone `build_index.py` script — see `create_chromadb_collections`.
+The Streamlit app never builds anything itself; it only *loads* the
+already-built collections at startup, via `load_chromadb_collections`.
+"""
 import os
+import re
+from pathlib import Path
+from typing import List, Tuple
 
 import chromadb
 from chromadb.utils import embedding_functions
 import pandas as pd
-import re
+
+# Shared locations/config, so `app.py` and `build_index.py` always agree on
+# where the index lives without duplicating the constants in both places.
+CHROMADB_PATH = "chromadb_data"
+INDEX_DATA_DIR = Path("index_data")
+ARC_LISTS_PATH = "ARC_Lists/"
+EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+
+_QUESTIONS_COLLECTION = "arc_questions"
+_QUES_DEF_COLLECTION = "ques_def_arc"
+
+_TEXT_COLUMNS = ["Question", "Definition"]
+_METADATA_COLUMNS = ["Form", "Section", "Question", "Body System"]
+
 
 def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.DataFrame:
     """Expand the ARC DataFrame by replacing user list questions with individual items from the corresponding CSV files.
@@ -22,7 +45,7 @@ def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.D
         question_type = str(row["Type"]).strip().lower()
         base_question = str(row["Question"]).strip()
 
-        if question_type in  ["user_list", "multilist"] and pd.notna(row["List"]):
+        if question_type in ["user_list", "multilist"] and pd.notna(row["List"]):
             list_identifier = str(row["List"]).strip()
 
             folder, file_name = list_identifier.split("_", 1)
@@ -43,93 +66,119 @@ def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.D
         elif question_type in ["radio", "checkbox"]:
 
             options = str(row["Answer Options"]).split('|')
-            cleaned_options = [res for s in options 
+            cleaned_options = [res for s in options
                                if (res := re.sub(r"\d+|,|unknown|yes|no", "", s, flags=re.IGNORECASE).strip())]
 
             options_to_add = ", Options: " + ", ".join(cleaned_options) if len(cleaned_options) > 0 else ''
             row["Question"] = row["Question"] + options_to_add
 
-            expanded_rows.append(row) 
-        else:    
+            expanded_rows.append(row)
+        else:
             expanded_rows.append(row)  # Keep the original row if not a list type or List column is NaN
 
     return pd.DataFrame(expanded_rows).reset_index(drop=True)
 
 
-def create_chromadb_collections(arc_df: pd.DataFrame, lists_path: str = "ARC_Lists/", model_name: str = None):
-    """Build the two Chroma collections (question+definition, question-only).
+def build_documents(df_expanded: pd.DataFrame) -> List[str]:
+    """Build the "Question. Definition. " text embedded/indexed for each row.
+
+    A pure function of `df_expanded` alone, so `documents` never needs to be
+    persisted on its own: both `create_chromadb_collections` (at build time)
+    and the app (at load time, from the persisted `df_expanded` CSV) derive
+    it from this single function and are guaranteed to agree.
+    """
+    return [
+        " ".join(f"{value}. " for _, value in row[_TEXT_COLUMNS].items())
+        for _, row in df_expanded.iterrows()
+    ]
+
+
+def build_ids(df_expanded: pd.DataFrame) -> List[str]:
+    """Doc ids shared by both Chroma collections and the BM25 index.
+
+    Purely positional (row i -> "arc_{i}"), so — like `build_documents` —
+    they're derived the same way at build time and at load time instead of
+    being persisted separately.
+    """
+    return [f"arc_{i}" for i in range(len(df_expanded))]
+
+
+def _build_metadatas(df_expanded: pd.DataFrame) -> List[dict]:
+    return [
+        {col: row[col] for col in _METADATA_COLUMNS if col in row.index}
+        for _, row in df_expanded.iterrows()
+    ]
+
+
+def create_chromadb_collections(arc_df: pd.DataFrame, lists_path: str = ARC_LISTS_PATH,
+                                 model_name: str = EMBEDDING_MODEL):
+    """Build (or refresh) the two Chroma collections from a raw ARC dataframe.
 
     This is the expensive step (embedding-model load + embedding the whole
-    catalog) and is meant to be called ONCE per app run — see
-    `app._create_collections_and_index`, which wraps this in
-    `st.cache_resource`.
-
-    Built over the *expanded* reference catalog: every `user_list` question
-    is exploded into one row per list item first (`create_expanded_arc_dataframe`),
-    so the index actually contains the individual list options rather than
-    just the generic "pick one from the list" question text.
+    catalog). It's only ever called from `build_index.py` now — see the
+    module docstring — never from the Streamlit app itself.
 
     Returns
     -------
     collection_questions : Chroma collection indexed on "Question" text only.
     collection_ques_def  : Chroma collection indexed on "Question: ... Definition: ..." text.
-    documents            : list[str] — the raw text indexed in collection_ques_def, in `ids` order.
-    ids                  : list[str] — the doc IDs shared by BOTH collections. Pass this exact
-                            list (and `documents`) to `bm25.create_bm25_retriever` too, so BM25
-                            and the dense collections use the same IDs and can be fused with RRF.
+    documents            : list[str] — same as `build_documents(df_expanded)`, returned here
+                            too so `build_index.py` can hand it straight to
+                            `bm25.create_bm25_retriever` without recomputing.
+    ids                  : list[str] — same as `build_ids(df_expanded)`.
     df_expanded          : the expanded ARC dataframe. Its row order matches `ids`/`documents`
-                            exactly (row i <-> "arc_{i}"). Callers should build the reference
-                            `Question` objects from THIS dataframe (not the original `arc_df`) —
-                            otherwise reference rows won't line up with retrieval results whenever
-                            any list expansion happened.
+                            exactly (row i <-> "arc_{i}"). This is the dataframe that gets
+                            persisted to `index_data/arc_expanded.csv` for the app to load.
     """
-    client = chromadb.PersistentClient(path="chromadb_data")
+    client = chromadb.PersistentClient(path=CHROMADB_PATH)
 
-    df_expanded = create_expanded_arc_dataframe(arc_df, lists_path)
+    df_expanded = create_expanded_arc_dataframe(arc_df, lists_path).fillna("")
 
-    # Clean empty fields to ensure empty strings instead of "NaN" text
-    df_expanded = df_expanded.fillna("")
-
-    # Generate the raw text as a combination of specific columns
-    documents = []
-    metadatas = []
-    ids = []
-
-    selected_columns = ['Question', 'Definition']
-    metadata_columns = ['Form', 'Section', 'Question', 'Body System']
-
-    for index, row in df_expanded.iterrows():
-        row_text = " ".join([f"{val}. " for _, val in row[selected_columns].items()])
-        documents.append(row_text)
-
-        # Store individual column data as metadata for structural filtering later.
-        # Guard against columns that may not exist in every ARC export.
-        metadatas.append({col: row[col] for col in metadata_columns if col in row.index})
-
-        # Generate unique IDs for each record entry — shared across BOTH Chroma
-        # collections and the BM25 index, so results can be fused later.
-        ids.append(f"arc_{index}")
+    documents = build_documents(df_expanded)
+    ids = build_ids(df_expanded)
+    metadatas = _build_metadatas(df_expanded)
 
     embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=model_name
     )
 
     collection_ques_def = client.get_or_create_collection(
-        name="ques_def_arc",
+        name=_QUES_DEF_COLLECTION,
         embedding_function=embedding_fn,
         metadata={"hnsw:space": "cosine"},
     )
-    # upsert (not add): the Chroma client is persistent on disk (`chromadb_data/`),
-    # so re-running the app against the same reference catalog would otherwise
-    # raise a "duplicate ID" error instead of just refreshing the collection.
+    # upsert (not add): re-running the build script against a refreshed
+    # ARC catalog should refresh the collection in place, not fail with a
+    # "duplicate ID" error.
     collection_ques_def.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
-    # Create another collection using only the questions
     collection_questions = client.get_or_create_collection(
-        name="arc_questions",
+        name=_QUESTIONS_COLLECTION,
         embedding_function=embedding_fn,
         metadata={"hnsw:space": "cosine"},
     )
-    collection_questions.upsert(ids=ids, documents=df_expanded['Question'].tolist(), metadatas=metadatas)
+    collection_questions.upsert(ids=ids, documents=df_expanded["Question"].tolist(), metadatas=metadatas)
 
     return collection_questions, collection_ques_def, documents, ids, df_expanded
+
+
+def load_chromadb_collections(model_name: str = EMBEDDING_MODEL) -> Tuple:
+    """Load the two Chroma collections previously built by `build_index.py`.
+
+    Connects to the same on-disk persistent client/collections that
+    `create_chromadb_collections` upserts into, without loading the
+    embedding model to build or re-embed anything new (the embedding
+    function is still needed to *query* the collections later, though).
+    """
+    client = chromadb.PersistentClient(path=CHROMADB_PATH)
+    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+    try:
+        collection_questions = client.get_collection(
+            name=_QUESTIONS_COLLECTION, embedding_function=embedding_fn)
+        collection_ques_def = client.get_collection(
+            name=_QUES_DEF_COLLECTION, embedding_function=embedding_fn)
+    except Exception as exc:
+        raise RuntimeError(
+            "ChromaDB collections not found. Build the index first: python build_index.py"
+        ) from exc
+    return collection_questions, collection_ques_def
