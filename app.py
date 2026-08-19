@@ -504,6 +504,7 @@ def main():
 
     if not st.session_state.get("flow_started"):
         if source_file:
+            try:
                 (reference_df, df_expanded, collection_questions, collection_ques_def,
                  documents, ids, bm25_retriever, stemmer) = _load_index()
             except RuntimeError as exc:
