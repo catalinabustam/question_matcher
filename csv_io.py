@@ -37,26 +37,45 @@ class QuestionCsvRepository:
             if d.status == MatchStatus.IGNORED:
                 continue
 
-            final_question = ""
-            if d.status == MatchStatus.MATCHED and d.matched:
-                final_question = d.matched.question
-            elif d.status == MatchStatus.CREATED:
-                final_question = d.new_text
+            if d.status == MatchStatus.MATCHED:
+                selected_matches = d.matched_questions or []
+                if not selected_matches:
+                    continue
+                for matched in selected_matches:
+                    rows.append({
+                        "original_section": d.source.section,
+                        "original_topic": d.source.topic or "",
+                        "original_answer_type": d.source.answer_type or "",
+                        "original_question": d.source.question,
+                        "translated_question": d.source.translated_question or "",
+                        "edited_translated_question": d.edited_translated_question or "",
+                        "original_options": d.source.options,
+                        "status": d.status.value,
+                        "matched_reference_id": matched.question_id,
+                        "matched_reference_question": matched.question,
+                        "new_question_id": d.new_id,
+                        "new_question_section": d.new_section,
+                        "new_question_text": d.new_text,
+                        "final_question": matched.question,
+                    })
+                continue
 
-            rows.append({
-                "original_section": d.source.section,
-                "original_topic": d.source.topic or "",
-                "original_answer_type": d.source.answer_type or "",
-                "original_question": d.source.question,
-                "translated_question": d.source.translated_question or "",
-                "edited_translated_question": d.edited_translated_question or "",
-                "original_options": d.source.options,
-                "status": d.status.value,
-                "matched_reference_id": d.matched.question_id if d.matched else "",
-                "matched_reference_question": d.matched.question if d.matched else "",
-                "new_question_id": d.new_id,
-                "new_question_section": d.new_section,
-                "new_question_text": d.new_text,
-                "final_question": final_question,
-            })
+            if d.status == MatchStatus.CREATED:
+                rows.append({
+                    "original_section": d.source.section,
+                    "original_topic": d.source.topic or "",
+                    "original_answer_type": d.source.answer_type or "",
+                    "original_question": d.source.question,
+                    "translated_question": d.source.translated_question or "",
+                    "edited_translated_question": d.edited_translated_question or "",
+                    "original_options": d.source.options,
+                    "status": d.status.value,
+                    "matched_reference_id": "",
+                    "matched_reference_question": "",
+                    "new_question_id": d.new_id,
+                    "new_question_section": d.new_section,
+                    "new_question_text": d.new_text,
+                    "final_question": d.new_text,
+                })
+
         return pd.DataFrame(rows)
