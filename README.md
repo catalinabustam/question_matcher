@@ -10,23 +10,38 @@ exists.
 
 ```bash
 pip install -r requirements.txt
+
+# One-off (or whenever the ARC catalog should be refreshed): downloads the
+# ARC catalog and builds the ChromaDB collections + BM25 index on disk.
+python build_index.py
+
 streamlit run app.py
 ```
 
 Optionally, create a `.env` file with `DEEPL_API_KEY=...` — it's loaded
 automatically at startup and pre-fills the API key field in the sidebar.
 
-## Reference catalog
+## Reference catalog & search index
 
-The reference CSV is no longer uploaded manually. On every app start (and
-cached for the session) it's downloaded straight from:
+Building the search index (downloading the ARC catalog, embedding it, and
+building the BM25 index) is a separate step from running the app — see
+`build_index.py`. It's not something the app does on your behalf, so
+starting the app is instant and never re-embeds the catalog.
+
+Run `python build_index.py` once, and again any time the ARC catalog should
+be refreshed. It downloads the catalog from:
 
 ```
 https://raw.githubusercontent.com/ISARICResearch/ARC/refs/heads/main/ARC.csv
 ```
 
-Its columns (`Section`, `Question`, `Answer Options`, `Type`, ...) go through
-the same column mapping as the source CSV.
+and persists everything the app needs to `chromadb_data/`, `arc_index_bm25/`,
+and `index_data/`. `app.py` only ever reads these back (see
+`vector_db.load_chromadb_collections` and `bm25.load_bm25_retriever`); if
+they're missing it shows an error telling you to run the build script.
+
+The catalog's columns (`Section`, `Question`, `Answer Options`, `Type`, ...)
+go through the same column mapping as the source CSV.
 
 ## Translation with DeepL (optional)
 
@@ -102,7 +117,10 @@ over from the source question unchanged.
 | `rules.py`             | Fixed rules for building a new question (section + answer type).          |
 | `csv_io.py`            | **Repository** pattern: CSV loading and export, isolated from the UI.      |
 | `translate.py`         | Translation client (DeepL), isolated from the rest of the logic.           |
-| `app.py`               | Presentation layer (Streamlit): file upload, ARC download, and the flow.   |
+| `build_index.py`       | Standalone CLI: downloads the ARC catalog, builds the ChromaDB collections and BM25 index, persists them to disk. Run manually, not by the app. |
+| `vector_db.py`         | ChromaDB collection building (`build_index.py`) and loading (`app.py`).    |
+| `bm25.py`               | BM25 index building (`build_index.py`) and loading (`app.py`).            |
+| `app.py`               | Presentation layer (Streamlit): file upload, loading the pre-built index, and the matching flow. |
 
 To change the similarity algorithm (e.g. to embeddings), just create a new
 class implementing `SimilarityStrategy` in `similarity.py` and assign it to
