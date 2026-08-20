@@ -57,12 +57,14 @@ def translate_questions(translator: DeepLTranslator, questions: List[Question],
                          source_lang: Optional[str] = None) -> List[Question]:
     """Return a new list of `Question` with the `translated_text` field filled in."""
 
+    translated_sections = translator.translate_many([q.section for q in questions], source_lang=source_lang)
     translated_questions = translator.translate_many([q.question for q in questions], source_lang=source_lang)
     translated_definitions = translator.translate_many([q.definition for q in questions], source_lang=source_lang)
     return [
         Question(
             row_index=q.row_index,
             section=q.section,
+            translated_section=translated_section,
             question=q.question,
             definition=q.definition,
             options=q.options,
@@ -70,5 +72,7 @@ def translate_questions(translator: DeepLTranslator, questions: List[Question],
             translated_question= translated_question,
             translated_definition= translated_definition,
         )
-        for q, translated_question, translated_definition in zip(questions, translated_questions, translated_definitions)
+        for q, translated_section, translated_question, translated_definition in zip(
+            questions, translated_sections, translated_questions, translated_definitions
+        )
     ]
