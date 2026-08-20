@@ -9,6 +9,7 @@ Flow:
    any), and/or the newly built question. Ignored questions are left out.
 """
 import os
+from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
@@ -29,7 +30,7 @@ DEEPL_LANGUAGES = ["ES", "EN-US", "EN-GB", "PT-BR", "PT-PT", "FR", "DE", "IT", "
 st.set_page_config(page_title="Question Matcher", layout="wide")
 
 NONE_OPTION = "— None —"
-CREATE_NEW_LABEL = "➕ No match: create a new question"
+CREATE_NEW_LABEL = "➕ Create a new question"
 IGNORE_LABEL = "🚫 Ignore this question (do not include in export)"
 
 # Pagination over the candidate list: show this many at first, grow by this
@@ -47,22 +48,6 @@ load_dotenv(override=True)
 @st.cache_resource(show_spinner="Loading the reference catalog and search index...")
 def _load_index():
     """Load the ARC index built ahead of time by `build_index.py`.
-
-    The app never builds the ChromaDB collections or the BM25 index itself
-    anymore — that's a separate, explicit step (`python build_index.py`)
-    run only when the ARC catalog needs to be (re)downloaded and (re)indexed.
-    This just reads back the already-built artifacts:
-
-    - `index_data/arc_raw.csv` / `arc_expanded.csv` — the reference tables.
-    - the ChromaDB collections persisted under `chromadb_data/`.
-    - the BM25 index persisted under `arc_index_bm25/`.
-
-    `documents`/`ids` aren't persisted separately; they're rebuilt
-    deterministically from `df_expanded` (see `vector_db.build_documents`/
-    `build_ids`), which guarantees they always match what the on-disk
-    collections/BM25 index were actually built from.
-
-    Raises a clear, actionable error if the index hasn't been built yet.
     """
     if not (INDEX_DATA_DIR / "arc_expanded.csv").exists():
         raise RuntimeError(
@@ -131,20 +116,15 @@ def _on_status_change(idx: int, trigger: str, num_candidates: int):
 
     elif trigger == "create_new" and st.session_state.get(create_new_key):
         st.session_state[ignore_key] = False
-        
-        # Clear candidate selections
-        for i in range(num_candidates):
-            st.session_state[f"candidate_{idx}_{i}"] = False
+
 
 
 def _on_candidate_change(idx: int):
     """Callback triggered when any candidate checkbox state changes."""
     ignore_key = f"ignore_{idx}"
-    create_new_key = f"create_new_{idx}"
-    
+   
     # If any candidate gets checked, clear Ignore and Create New
     st.session_state[ignore_key] = False
-    st.session_state[create_new_key] = False
 
 
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
@@ -166,24 +146,70 @@ def _reset_session():
         st.session_state.pop(key, None)
 
 
-def _save_decision(idx: int, selected_labels: list[str], candidates, new_section: str,
-                  new_text: str, create_new: bool = False, ignore: bool = False):
+def _existing_variable_ids(exclude: MatchDecision | None = None) -> set[str]:
+    """Every variable name already in use — the ARC catalog plus any
+    already-created new questions — so `build_new_question` can guarantee
+    its ARC-style variable name doesn't collide with either.
+
+    `exclude` is the decision currently being (re)previewed, if any: its own
+    previously-assigned `new_id` must not count as "existing", or every
+    rerun would see it as a collision with itself and keep incrementing.
+    """
+    arc_catalog_df = st.session_state.get("arc_catalog_df")
+    arc_ids = set(arc_catalog_df["Variable"].dropna().astype(str)) if arc_catalog_df is not None else set()
+    created_ids = {
+        d.new_id for d in st.session_state.get("decisions", [])
+        if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
+        and d.new_id and d is not exclude
+    }
+    return arc_ids | created_ids
+
+def _save_decision(
+    idx: int, selected_labels: list[str], candidates, new_section: str,
+    new_text: str, create_new: bool = False, ignore: bool = False,
+    new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
+    new_choices: str = "", new_field_note: str = "", new_validation_min: str = "",
+    new_validation_max: str = "", new_required_field: str = ""
+):
     decision = st.session_state.decisions[idx]
     if create_new:
+        matched_questions = [
+            c.question for c in candidates if _candidate_label(c) in selected_labels
+        ]
         sequence = sum(1 for d in st.session_state.decisions
-                        if d.status == MatchStatus.CREATED) + 1
-        new_id, default_section, default_text = build_new_question(decision.source, sequence)
-        decision.status = MatchStatus.CREATED
-        decision.matched = None
-        decision.matches = []
-        decision.new_id = new_id
-        decision.new_section = new_section or default_section
-        decision.new_text = new_text or default_text
+                        if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)) + 1
+        preview = build_new_question(
+            decision.source, sequence, section=new_section,
+            existing_ids=_existing_variable_ids(exclude=decision)
+        )
+        decision.status = (MatchStatus.MATCHED_CREATED
+                           if selected_labels else MatchStatus.CREATED)
+        decision.matched = matched_questions[0] if matched_questions else None
+        decision.matches = matched_questions
+        decision.new_id = new_field_name or preview["new_id"]
+        decision.new_form_name = new_form_name or preview["new_form_name"]
+        decision.new_section = new_section or preview["new_section"]
+        decision.new_field_type = new_field_type or preview["new_field_type"]
+        decision.new_text = new_text or preview["new_text"]
+        decision.new_choices = new_choices or preview["new_choices"]
+        decision.new_field_note = new_field_note or preview["new_field_note"]
+        decision.new_validation_type = ""
+        decision.new_validation_min = new_validation_min or preview["new_validation_min"]
+        decision.new_validation_max = new_validation_max or preview["new_validation_max"]
+        decision.new_identifier = ""
+        decision.new_branching_logic = ""
+        decision.new_required_field = new_required_field or preview["new_required_field"]
+        decision.new_custom_alignment = ""
+        decision.new_field_annotation = ""
     elif ignore:
         decision.status = MatchStatus.IGNORED
         decision.matched = None
         decision.matches = []
         decision.new_id = decision.new_section = decision.new_text = ""
+        decision.new_form_name = decision.new_field_type = decision.new_choices = ""
+        decision.new_field_note = decision.new_validation_type = decision.new_validation_min = ""
+        decision.new_validation_max = decision.new_identifier = decision.new_branching_logic = ""
+        decision.new_required_field = decision.new_custom_alignment = decision.new_field_annotation = ""
     else:
         matched_questions = [
             c.question for c in candidates if _candidate_label(c) in selected_labels
@@ -192,6 +218,10 @@ def _save_decision(idx: int, selected_labels: list[str], candidates, new_section
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
         decision.new_id = decision.new_section = decision.new_text = ""
+        decision.new_form_name = decision.new_field_type = decision.new_choices = ""
+        decision.new_field_note = decision.new_validation_type = decision.new_validation_min = ""
+        decision.new_validation_max = decision.new_identifier = decision.new_branching_logic = ""
+        decision.new_required_field = decision.new_custom_alignment = decision.new_field_annotation = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -290,8 +320,10 @@ def _render_mapping(df: pd.DataFrame, prefix: str):
 def _render_progress():
     decisions = st.session_state.decisions
     total = len(decisions)
-    matched = sum(1 for d in decisions if d.status == MatchStatus.MATCHED)
-    created = sum(1 for d in decisions if d.status == MatchStatus.CREATED)
+    matched = sum(1 for d in decisions
+                  if d.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED))
+    created = sum(1 for d in decisions
+                  if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED))
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
     pending = total - matched - created - ignored
 
@@ -361,7 +393,7 @@ def _render_question_flow():
                    "Adjust the filter in the sidebar, ignore this question, or create a new one.")
     
     default_selected = set()
-    if decision.status == MatchStatus.MATCHED:
+    if decision.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
         default_selected = {
             _candidate_label(c) for c in candidates
             if any(matched.row_index == c.question.row_index for matched in decision.matched_questions)
@@ -376,7 +408,8 @@ def _render_question_flow():
 
     create_new_key = f"create_new_{idx}"
     if create_new_key not in st.session_state:
-        st.session_state[create_new_key] = decision.status == MatchStatus.CREATED
+        st.session_state[create_new_key] = decision.status in (
+            MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
 
     ignore = st.checkbox(
         IGNORE_LABEL,
@@ -409,6 +442,8 @@ def _render_question_flow():
                     arc_row = st.session_state.reference_df.loc[candidate.question.row_index]
                     st.dataframe(arc_row.astype(str).rename("Value"), use_container_width=True)
        
+    st.caption(f"✅ {len(selected_match_labels)} of {num_candidates} candidate(s) selected for matching.")
+
     create_new = st.checkbox(
         CREATE_NEW_LABEL,
         key=create_new_key,
@@ -416,29 +451,180 @@ def _render_question_flow():
         args=(idx, "create_new", num_candidates),
     )
 
-    new_section = new_text = ""
+    # Initialize all new question fields
+    new_field_name = new_form_name = new_section = new_field_type = new_text = ""
+    new_choices = new_field_note = new_validation_min = new_validation_max = ""
+    new_required_field = ""
+    variable_name_conflict = False
+
     if create_new:
         preview_seq = sum(1 for d in st.session_state.decisions
-                           if d.status == MatchStatus.CREATED) + 1
-        preview_id, default_section, default_text = build_new_question(source, preview_seq)
-        new_section = st.text_input("New question section",
-                                     value=decision.new_section or default_section, key=f"sec_{idx}")
-        new_text = st.text_area("New question text",
-                                 value=decision.new_text or default_text, key=f"text_{idx}")
+                   if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)) + 1
+
+        # Get available forms from ARC catalog
+        available_forms = sorted(
+            st.session_state.reference_df["Form"].dropna().astype(str).unique().tolist()
+        )
+        available_sections = sorted(
+            section for section in st.session_state.reference_df["Section"].dropna()
+            .astype(str).str.strip().unique().tolist() if section
+        )
+        custom_section_label = "➕ Create a new section"
+        section_options = available_sections + [custom_section_label]
+        saved_section = (
+            decision.new_section
+            or source.translated_section
+            or source.section
+            or ""
+        )
+        section_is_available = saved_section in available_sections
+        section_choice = st.selectbox(
+            "Section Header *",
+            options=section_options,
+            index=available_sections.index(saved_section) if section_is_available else len(available_sections),
+            key=f"sec_choice_{idx}",
+            help="Choose an ARC section or create a new section if none is appropriate.",
+        )
+        if section_choice == custom_section_label:
+            new_section = st.text_input(
+                "New Section Header *",
+                value="" if section_is_available else saved_section,
+                key=f"sec_custom_{idx}",
+                help="Enter a new section header.",
+            ).strip()
+        else:
+            new_section = section_choice
+
+        # Get preview values from build_new_question
+        preview = build_new_question(
+            source, preview_seq, section=new_section,
+            existing_ids=_existing_variable_ids(exclude=decision)
+        )
+        field_name_key = f"vid_{idx}"
+        field_name_section_key = f"vid_section_{idx}"
+        if field_name_section_key not in st.session_state:
+            st.session_state[field_name_key] = decision.new_id or preview["new_id"]
+            st.session_state[field_name_section_key] = new_section
+        elif st.session_state[field_name_section_key] != new_section:
+            st.session_state[field_name_key] = preview["new_id"]
+            st.session_state[field_name_section_key] = new_section
+
+        st.markdown("**New Question Details (Data Dictionary Fields)**")
+
+        # Row 1: Form Name, Field Type
+        col1, col2 = st.columns(2)
+        with col1:
+            new_form_name = st.selectbox(
+                "Form Name *",
+                options=[""] + available_forms,
+                index=0 if not decision.new_form_name else ([""] + available_forms).index(decision.new_form_name) if decision.new_form_name in available_forms else 0,
+                key=f"form_{idx}",
+                help="Select the form this question belongs to"
+            )
+        with col2:
+            new_field_type = st.selectbox(
+                "Field Type *",
+                options=_KEPT_FIELD_TYPES,
+                index=_KEPT_FIELD_TYPES.index(decision.new_field_type) if decision.new_field_type in _KEPT_FIELD_TYPES else _KEPT_FIELD_TYPES.index(preview["new_field_type"]),
+                key=f"ftype_{idx}",
+                help="REDCap field type"
+            )
+
+        # Row 2: Selected Section, Variable / Field Name
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption(f"Section: {new_section or '—'}")
+        with col2:
+            new_field_name = st.text_input(
+                "Variable / Field Name *",
+                key=field_name_key,
+                help="ARC-style variable name (domain_topic_detail), auto-suggested — edit if needed"
+            )
+            variable_name_conflict = (
+                bool(new_field_name)
+                and new_field_name in _existing_variable_ids(exclude=decision)
+            )
+            if variable_name_conflict:
+                st.error(
+                    f"Variable name '{new_field_name}' is already in use "
+                    "(ARC catalog or another created question). Choose a different name."
+                )
+
+        # Row 3: Field Label (Question text)
+        new_text = st.text_area(
+            "Field Label *",
+            value=decision.new_text or preview["new_text"],
+            key=f"text_{idx}",
+            height=80,
+            help="The question text shown to users"
+        )
+
+        # Row 4: Choices, Calculations, OR Slider Labels
+        new_choices = st.text_area(
+            "Choices, Calculations, OR Slider Labels",
+            value=decision.new_choices or preview["new_choices"],
+            key=f"choices_{idx}",
+            height=80,
+            help="For radio/dropdown/checkbox: pipe-separated 'code, label' pairs. For slider: min,max,step"
+        )
+
+        # Row 5: Field Note
+        new_field_note = st.text_area(
+            "Field Note",
+            value=decision.new_field_note or preview["new_field_note"],
+            key=f"fnote_{idx}",
+            height=60,
+            help="Optional note shown below the field"
+        )
+
+        # Row 6: Text Validation Min, Text Validation Max
+        col1, col2 = st.columns(2)
+        with col1:
+            new_validation_min = st.text_input(
+                "Text Validation Min",
+                value=decision.new_validation_min or preview["new_validation_min"],
+                key=f"vmin_{idx}",
+                help="Minimum value for validation"
+            )
+        with col2:
+            new_validation_max = st.text_input(
+                "Text Validation Max",
+                value=decision.new_validation_max or preview["new_validation_max"],
+                key=f"vmax_{idx}",
+                help="Maximum value for validation"
+            )
+
+        # Row 7: Required Field?
+        new_required_field = st.selectbox(
+            "Required Field?",
+            options=["", "yes", "no"],
+            index=["", "yes", "no"].index(decision.new_required_field) if decision.new_required_field in ["yes", "no"] else 0,
+            key=f"req_{idx}",
+            help="Whether this field is required"
+        )
     elif ignore:
         st.caption("This question will be excluded from the final export.")
 
-    can_save = bool(selected_match_labels) or create_new or ignore
+    can_save = (
+        (bool(selected_match_labels) or (create_new and bool(new_section)))
+        and not (create_new and variable_name_conflict)
+    ) or ignore
     if not can_save:
-        st.caption("Select one or more candidates, choose a new question, or ignore this row.")
+        st.caption("Select one or more candidates, enter a section for the new question, or ignore this row.")
 
     nav_cols = st.columns([1, 1, 1, 5])
     if nav_cols[0].button("⬅ Previous", disabled=idx == 0):
         st.session_state.current_idx = max(0, idx - 1)
         st.rerun()
     if nav_cols[1].button("Save and continue ➡", type="primary", disabled=not can_save):
-        _save_decision(idx, selected_match_labels, candidates, new_section, new_text,
-                       create_new=create_new, ignore=ignore)
+        _save_decision(
+            idx, selected_match_labels, candidates, new_section, new_text,
+            create_new=create_new, ignore=ignore,
+            new_field_name=new_field_name, new_form_name=new_form_name,
+            new_field_type=new_field_type, new_choices=new_choices,
+            new_field_note=new_field_note, new_validation_min=new_validation_min,
+            new_validation_max=new_validation_max, new_required_field=new_required_field
+        )
         if idx < total - 1:
             st.session_state.current_idx = idx + 1
         st.rerun()
@@ -459,7 +645,7 @@ def _matched_arc_rows() -> pd.DataFrame:
     arc_catalog_df = st.session_state.arc_catalog_df
     matched_row_question_ids = []
     for decision in st.session_state.decisions:
-        if decision.status != MatchStatus.MATCHED:
+        if decision.status not in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
             continue
         for matched in decision.matched_questions:
             if matched.question_id:
