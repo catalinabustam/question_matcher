@@ -9,6 +9,7 @@ class MatchStatus(str, Enum):
     PENDING = "pending"
     MATCHED = "matched"
     CREATED = "created"
+    MATCHED_CREATED = "matched and created"
     IGNORED = "ignored"  # user chose not to include this question in the export
 
 
@@ -21,10 +22,24 @@ class Question:
     section: Optional[str] = None
     definition: Optional[str] = None
     options: Optional[str] = None
+    translated_section: Optional[str] = None
     translated_question: Optional[str] = None
     translated_definition: Optional[str] = None
     topic: Optional[str] = None
     answer_type: Optional[str] = None
+    # Data dictionary fields (for newly created questions)
+    form_name: Optional[str] = None
+    field_type: Optional[str] = None
+    choices: Optional[str] = None
+    field_note: Optional[str] = None
+    validation_type: Optional[str] = None
+    validation_min: Optional[str] = None
+    validation_max: Optional[str] = None
+    identifier: Optional[str] = None
+    branching_logic: Optional[str] = None
+    required_field: Optional[str] = None
+    custom_alignment: Optional[str] = None
+    field_annotation: Optional[str] = None
 
 
 @dataclass
@@ -44,6 +59,19 @@ class MatchDecision:
     new_section: str = ""
     new_text: str = ""
     new_id: str = ""
+    # Data dictionary fields for newly created questions
+    new_form_name: str = ""
+    new_field_type: str = ""
+    new_choices: str = ""
+    new_field_note: str = ""
+    new_validation_type: str = ""
+    new_validation_min: str = ""
+    new_validation_max: str = ""
+    new_identifier: str = ""
+    new_branching_logic: str = ""
+    new_required_field: str = ""
+    new_custom_alignment: str = ""
+    new_field_annotation: str = ""
     edited_translated_question: str = ""
     edited_translated_definition: str = ""
 
