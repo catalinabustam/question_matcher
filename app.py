@@ -72,7 +72,7 @@ def _read_csv(uploaded_file, separator: str) -> pd.DataFrame:
 
 
 def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = False,
-                      preferred: tuple = ()):
+                      preferred: tuple = (), disabled: bool = False):
     columns = list(df.columns)
     options = [NONE_OPTION] + columns if optional else columns
     default_index = 0
@@ -81,7 +81,7 @@ def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = Fa
         if matches:
             default_index = options.index(matches[0])
             break
-    choice = st.selectbox(label, options, index=default_index, key=key)
+    choice = st.selectbox(label, options, index=default_index, key=key, disabled=disabled)
     return None if choice == NONE_OPTION else choice
 
 
@@ -168,8 +168,12 @@ def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
     new_text: str, create_new: bool = False, ignore: bool = False,
     new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
-    new_choices: str = "", new_field_note: str = "", new_validation_min: str = "",
-    new_validation_max: str = "", new_required_field: str = ""
+    new_options: str = "", new_field_note: str = "", new_validation_type: str = "",
+    new_validation_min: str = "", new_validation_max: str = "",
+    new_identifier: str = "", new_branching_logic: str = "",
+    new_required_field: str = "", new_custom_alignment: str = "",
+    new_field_annotation: str = "", new_matrix_group_name: str = "",
+    new_matrix_ranking: str = "", new_question_number: str = ""
 ):
     decision = st.session_state.decisions[idx]
     if create_new:
@@ -191,25 +195,29 @@ def _save_decision(
         decision.new_section = new_section or preview["new_section"]
         decision.new_field_type = new_field_type or preview["new_field_type"]
         decision.new_text = new_text or preview["new_text"]
-        decision.new_choices = new_choices or preview["new_choices"]
+        decision.new_options = new_options or preview["new_options"]
         decision.new_field_note = new_field_note or preview["new_field_note"]
-        decision.new_validation_type = ""
+        decision.new_validation_type = new_validation_type or preview.get("new_validation_type", "")
         decision.new_validation_min = new_validation_min or preview["new_validation_min"]
         decision.new_validation_max = new_validation_max or preview["new_validation_max"]
-        decision.new_identifier = ""
-        decision.new_branching_logic = ""
+        decision.new_identifier = new_identifier or preview.get("new_identifier", "")
+        decision.new_branching_logic = new_branching_logic or preview.get("new_branching_logic", "")
         decision.new_required_field = new_required_field or preview["new_required_field"]
-        decision.new_custom_alignment = ""
-        decision.new_field_annotation = ""
+        decision.new_custom_alignment = new_custom_alignment or preview.get("new_custom_alignment", "")
+        decision.new_field_annotation = new_field_annotation or preview.get("new_field_annotation", "")
+        decision.new_matrix_group_name = new_matrix_group_name or preview.get("new_matrix_group_name", "")
+        decision.new_matrix_ranking = new_matrix_ranking or preview.get("new_matrix_ranking", "")
+        decision.new_question_number = new_question_number or preview.get("new_question_number", "")
     elif ignore:
         decision.status = MatchStatus.IGNORED
         decision.matched = None
         decision.matches = []
         decision.new_id = decision.new_section = decision.new_text = ""
-        decision.new_form_name = decision.new_field_type = decision.new_choices = ""
+        decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = decision.new_validation_min = ""
         decision.new_validation_max = decision.new_identifier = decision.new_branching_logic = ""
         decision.new_required_field = decision.new_custom_alignment = decision.new_field_annotation = ""
+        decision.new_matrix_group_name = decision.new_matrix_ranking = decision.new_question_number = ""
     else:
         matched_questions = [
             c.question for c in candidates if _candidate_label(c) in selected_labels
@@ -218,10 +226,11 @@ def _save_decision(
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
         decision.new_id = decision.new_section = decision.new_text = ""
-        decision.new_form_name = decision.new_field_type = decision.new_choices = ""
+        decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = decision.new_validation_min = ""
         decision.new_validation_max = decision.new_identifier = decision.new_branching_logic = ""
         decision.new_required_field = decision.new_custom_alignment = decision.new_field_annotation = ""
+        decision.new_matrix_group_name = decision.new_matrix_ranking = decision.new_question_number = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -296,25 +305,42 @@ def _allowed_row_indices(reference_df: pd.DataFrame, filters: dict):
     return matched
 
 
-def _render_mapping(df: pd.DataFrame, prefix: str):
+def _render_mapping(df: pd.DataFrame, prefix: str, is_source: bool = True):
+    """Render column mapping UI for source (REDCap data dictionary) or reference (ARC catalog)."""
     st.markdown(f"**Columns — {prefix}**")
-    form_col = _column_selector(df, "Form column", f"{prefix}_form", optional=True,
-                                     preferred=("Form","Form",))
-    section_col = _column_selector(df, "Section column", f"{prefix}_section", optional=True,
-                                        preferred=("Section","Section",))
-    question_col = _column_selector(df, "Question column", f"{prefix}_question",
-                                     preferred=("Question","Question",))
-    definition_col = _column_selector(df, "Definition column", f"{prefix}_definition", optional=True,
-                                         preferred=("Definition","Definition",))
-    answer_type_col = _column_selector(df, "Answer type column", f"{prefix}_answer_type", optional=True,
-                                        preferred=("Type", "Type"))
-    options_col = _column_selector(df, "Answer options column", f"{prefix}_options", optional=True,
-                                    preferred=("Answer Options","Answer Options",))
-    body_system_col = _column_selector(df, "Body System column", f"{prefix}_body_system", optional=True,
-                                        preferred=("Body System", "Body System",))
-    id_col = _column_selector(df, "ID column", f"{prefix}_id", optional=True,
-                               preferred=("Variable", "ID", "Id"))
-    return form_col,question_col, definition_col, section_col, options_col, answer_type_col, id_col, body_system_col
+
+    # REDCap Data Dictionary columns (for source)
+    redcap_columns = [
+        ("Variable / Field Name", "variable", "Variable"),
+        ("Form Name", "form_name", "form"),
+        ("Section Header", "section", "Section"),
+        ("Field Type", "field_type", "Type"),
+        ("Field Label", "question", "Question"),
+        ("Definition (optional)", "definition", "Definition"),
+        ("Choices, Calculations, OR Slider Labels", "options", "Answer Options"),
+        ("Field Note", "field_note", ""),
+        ("Text Validation Type OR Show Slider Number", "validation", "Validation"),
+        ("Text Validation Min", "validation_min", "Minimum"),
+        ("Text Validation Max", "validation_max", "Maximum"),
+        ("Identifier?", "identifier", "Identifier"),
+        ("Branching Logic (Show field only if...)", "branching_logic", "Skip Logic"),
+        ("Required Field?", "required_field", ""),
+        ("Custom Alignment", "custom_alignment", ""),
+        ("Question Number (surveys only)", "question_number", ""),
+        ("Matrix Group Name", "matrix_group", ""),
+        ("Matrix Ranking?", "matrix_ranking", ""),
+        ("Field Annotation", "field_annotation", "")
+    ]
+
+
+    # Render selectors for each column
+    results = {}
+    for label, key, preferred in redcap_columns:
+        # For required columns (id, question), don't allow None
+        optional = key not in ("question")
+        results[key] = _column_selector(df, f"{label}", f"{prefix}_{key}", optional=optional, preferred=(preferred, label), disabled= not is_source)
+
+    return results
 
 
 def _render_progress():
@@ -347,7 +373,7 @@ def _render_question_flow():
         st.markdown(f"**Original question:** {source.question}"
                     f"  ·  **Original definition:** {source.definition or '—'}")
         st.markdown(f"**Section:** {source.section or '—'}" 
-                    f"  ·  **Answer type:** {source.answer_type or '—'}") 
+                    f"  ·  **Answer type:** {source.field_type or '—'}") 
         if source.options:
             st.markdown(f"**Options:** {source.options}")
 
@@ -452,54 +478,49 @@ def _render_question_flow():
     )
 
     # Initialize all new question fields
+
     new_field_name = new_form_name = new_section = new_field_type = new_text = ""
-    new_choices = new_field_note = new_validation_min = new_validation_max = ""
-    new_required_field = ""
+    new_options = new_field_note = new_validation_type = ""
+    new_validation_min = new_validation_max = ""
+    new_identifier = new_branching_logic = new_required_field = ""
+    new_custom_alignment = new_field_annotation = ""
+    new_matrix_group_name = new_matrix_ranking = new_question_number = ""
     variable_name_conflict = False
 
     if create_new:
+
         preview_seq = sum(1 for d in st.session_state.decisions
                    if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)) + 1
-
+       
         # Get available forms from ARC catalog
+
         available_forms = sorted(
             st.session_state.reference_df["Form"].dropna().astype(str).unique().tolist()
         )
-        available_sections = sorted(
-            section for section in st.session_state.reference_df["Section"].dropna()
-            .astype(str).str.strip().unique().tolist() if section
-        )
-        custom_section_label = "➕ Create a new section"
-        section_options = available_sections + [custom_section_label]
-        saved_section = (
-            decision.new_section
-            or source.translated_section
-            or source.section
-            or ""
-        )
-        section_is_available = saved_section in available_sections
-        section_choice = st.selectbox(
-            "Section Header *",
-            options=section_options,
-            index=available_sections.index(saved_section) if section_is_available else len(available_sections),
-            key=f"sec_choice_{idx}",
-            help="Choose an ARC section or create a new section if none is appropriate.",
-        )
-        if section_choice == custom_section_label:
-            new_section = st.text_input(
-                "New Section Header *",
-                value="" if section_is_available else saved_section,
-                key=f"sec_custom_{idx}",
-                help="Enter a new section header.",
-            ).strip()
-        else:
-            new_section = section_choice
+        available_forms_lower = [form.lower() for form in available_forms]
 
-        # Get preview values from build_new_question
+        if source.form_name is not None and source.form_name.lower() not in available_forms_lower:
+            available_forms = [source.form_name] + available_forms
+
+        default_selected_form = decision.new_form_name or source.form_name or None
+
+        available_sections = sorted([ x for x in 
+            st.session_state.reference_df["Section"].dropna().astype(str).unique().tolist() if x])
+        
+        available_sections_lower = [section.lower() for section in available_sections]
+        
+        if source.section !='' and source.section.lower() not in available_sections_lower:
+            available_sections = [source.section] + available_sections
+
+        default_selected_section = decision.new_section or source.section or None
+
+        field_name_key = f"vid_{idx}"
+
         preview = build_new_question(
             source, preview_seq, section=new_section,
             existing_ids=_existing_variable_ids(exclude=decision)
         )
+
         field_name_key = f"vid_{idx}"
         field_name_section_key = f"vid_section_{idx}"
         if field_name_section_key not in st.session_state:
@@ -509,6 +530,17 @@ def _render_question_flow():
             st.session_state[field_name_key] = preview["new_id"]
             st.session_state[field_name_section_key] = new_section
 
+        # Streamlit handles the text input inline when accept_new_options=True
+        new_section = st.selectbox(
+            "Section Header *",
+            options=[""] + available_sections,
+            index=available_sections.index(default_selected_section) + 1 if default_selected_section else 0,
+            accept_new_options=True,
+            key=f"sec_choice_{idx}",
+            help="Choose an ARC section or type to add a new one.",
+        )
+
+
         st.markdown("**New Question Details (Data Dictionary Fields)**")
 
         # Row 1: Form Name, Field Type
@@ -517,7 +549,7 @@ def _render_question_flow():
             new_form_name = st.selectbox(
                 "Form Name *",
                 options=[""] + available_forms,
-                index=0 if not decision.new_form_name else ([""] + available_forms).index(decision.new_form_name) if decision.new_form_name in available_forms else 0,
+                index= available_forms.index(default_selected_form) + 1 if default_selected_form else 0,
                 key=f"form_{idx}",
                 help="Select the form this question belongs to"
             )
@@ -525,7 +557,7 @@ def _render_question_flow():
             new_field_type = st.selectbox(
                 "Field Type *",
                 options=_KEPT_FIELD_TYPES,
-                index=_KEPT_FIELD_TYPES.index(decision.new_field_type) if decision.new_field_type in _KEPT_FIELD_TYPES else _KEPT_FIELD_TYPES.index(preview["new_field_type"]),
+                index=_KEPT_FIELD_TYPES.index(decision.new_field_type) if decision.new_field_type in _KEPT_FIELD_TYPES else _KEPT_FIELD_TYPES.index('text'),
                 key=f"ftype_{idx}",
                 help="REDCap field type"
             )
@@ -560,9 +592,9 @@ def _render_question_flow():
         )
 
         # Row 4: Choices, Calculations, OR Slider Labels
-        new_choices = st.text_area(
+        new_options = st.text_area(
             "Choices, Calculations, OR Slider Labels",
-            value=decision.new_choices or preview["new_choices"],
+            value=decision.new_options or preview["new_options"],
             key=f"choices_{idx}",
             height=80,
             help="For radio/dropdown/checkbox: pipe-separated 'code, label' pairs. For slider: min,max,step"
@@ -577,16 +609,23 @@ def _render_question_flow():
             help="Optional note shown below the field"
         )
 
-        # Row 6: Text Validation Min, Text Validation Max
-        col1, col2 = st.columns(2)
+        # Row 6: Text Validation Type, Text Validation Min, Text Validation Max
+        col1, col2, col3 = st.columns(3)
         with col1:
+            new_validation_type = st.text_input(
+                "Text Validation Type OR Show Slider Number",
+                value=decision.new_validation_type or preview.get("new_validation_type", ""),
+                key=f"vtype_{idx}",
+                help="Validation type (e.g., integer, number, date_ymd, email, etc.)"
+            )
+        with col2:
             new_validation_min = st.text_input(
                 "Text Validation Min",
                 value=decision.new_validation_min or preview["new_validation_min"],
                 key=f"vmin_{idx}",
                 help="Minimum value for validation"
             )
-        with col2:
+        with col3:
             new_validation_max = st.text_input(
                 "Text Validation Max",
                 value=decision.new_validation_max or preview["new_validation_max"],
@@ -621,9 +660,13 @@ def _render_question_flow():
             idx, selected_match_labels, candidates, new_section, new_text,
             create_new=create_new, ignore=ignore,
             new_field_name=new_field_name, new_form_name=new_form_name,
-            new_field_type=new_field_type, new_choices=new_choices,
-            new_field_note=new_field_note, new_validation_min=new_validation_min,
-            new_validation_max=new_validation_max, new_required_field=new_required_field
+            new_field_type=new_field_type, new_options=new_options,
+            new_field_note=new_field_note, new_validation_type=new_validation_type,
+            new_validation_min=new_validation_min, new_validation_max=new_validation_max,
+            new_identifier=new_identifier, new_branching_logic=new_branching_logic,
+            new_required_field=new_required_field, new_custom_alignment=new_custom_alignment,
+            new_field_annotation=new_field_annotation, new_matrix_group_name=new_matrix_group_name,
+            new_matrix_ranking=new_matrix_ranking, new_question_number=new_question_number
         )
         if idx < total - 1:
             st.session_state.current_idx = idx + 1
@@ -643,15 +686,15 @@ def _matched_arc_rows() -> pd.DataFrame:
     """
     reference_df = st.session_state.reference_df
     arc_catalog_df = st.session_state.arc_catalog_df
-    matched_row_question_ids = []
+    matched_row_variable_names = []
     for decision in st.session_state.decisions:
         if decision.status not in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
             continue
         for matched in decision.matched_questions:
-            if matched.question_id:
-                matched_row_question_ids.append(matched.question_id)
+            if matched.variable:
+                matched_row_variable_names.append(matched.variable)
 
-    return arc_catalog_df[arc_catalog_df["Variable"].isin(matched_row_question_ids)]
+    return arc_catalog_df[arc_catalog_df["Variable"].isin(matched_row_variable_names)]
 
 
 def _render_export():
@@ -698,26 +741,27 @@ def main():
                 return
 
             source_df = _read_csv(source_file, separator)
-
+        
             st.markdown("### Column mapping")
+            
             col_a, col_b = st.columns(2)
             with col_a:
-                (s_form_col,s_question_col, s_definition_col, s_section_col, s_options_col, s_answer_type_col, s_id_col, s_body_system_col) = _render_mapping(source_df, "source")
+                results_s = _render_mapping(source_df, "source", is_source=True)
             with col_b:
-                (r_form_col,r_question_col, r_definition_col, r_section_col, r_options_col, r_answer_type_col, r_id_col, r_body_system_col) = _render_mapping(reference_df, "ARC")
+                results_r = _render_mapping(reference_df, "ARC", is_source=False)
 
-            if st.button("Start comparison", type="primary", disabled=not (s_question_col and r_question_col)):
+        
+            if st.button("Start comparison", type="primary", disabled=not results_s['question']):
                 source_qs = QuestionCsvRepository.load(
-                    source_df, question_col=s_question_col, definition_col=s_definition_col, section_col=s_section_col,
-                    options_col=s_options_col, id_col=s_id_col, answer_type_col=s_answer_type_col)
+                    source_df, results_s)
                 # IMPORTANT: loaded from `df_expanded`, not `reference_df`. The
                 # ChromaDB collections and the BM25 index above were built over
                 # the expanded catalog (one row per user-list item), so the
                 # reference Question at position i must come from that same
                 # dataframe for `reference[i]` to correspond to doc id `ids[i]`.
                 reference_qs = QuestionCsvRepository.load(
-                    df_expanded, question_col=r_question_col, definition_col=r_definition_col, section_col=r_section_col,
-                    options_col=r_options_col, id_col=r_id_col, answer_type_col=r_answer_type_col)
+                    df_expanded, results_r)
+                
                 if use_translation:
                     try:
                         translator = DeepLTranslator(api_key)

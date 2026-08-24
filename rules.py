@@ -145,54 +145,59 @@ def infer_answer_type(options: str) -> str:
 def build_new_question(
     source: Question,
     sequence: int,
-    form_name: str = "",
-    field_type: str = "",
-    choices: str = "",
-    field_note: str = "",
-    validation_min: str = "",
-    validation_max: str = "",
-    required_field: str = "",
-    existing_ids: set[str] | None = None,
-    section: str | None = None
+    section: str | None = None,
+    existing_ids: set[str] | None = None
 ) -> dict[str, Any]:
-    
+
     del sequence  # kept for backward-compatible call signature; see docstring
-    answer_type = source.answer_type or infer_answer_type(source.options or "")
-    new_section = section if section is not None else source.section
-    new_id = build_variable_name(
+
+    answer_type = source.field_type or infer_answer_type(source.options or "")
+    new_section = section if section is not None else source.section or source.translated_section  
+    new_id = source.variable or build_variable_name(
         section=new_section,
         question=source.translated_question or source.question,
         existing_ids=existing_ids
     )
 
     # Default field_type to "text" if not provided, but validate against REDCap allowed types
-    if not field_type:
-        field_type = "text"
-    elif field_type not in _KEPT_FIELD_TYPES:
-        # If provided field_type is not in allowed types, default to text
-        field_type = "text"
-
-    # Use source options if choices not provided
-    if not choices:
-        choices = source.options or ""
+    field_type = source.field_type if source.field_type in _KEPT_FIELD_TYPES else "text"
+   
+    options = source.options or ""
 
     # Use translated question if available, otherwise fall back to original
     new_text = source.translated_question or source.question
 
+    # Use source REDCap fields if available
+    new_field_note = source.field_note or source.field_note or ""
+    new_validation = source.validation or source.validation or ""
+    new_validation_min = source.validation_min or source.validation_min or ""
+    new_validation_max = source.validation_max or source.validation_max or ""
+    new_identifier = source.identifier or source.identifier or ""
+    new_branching_logic = source.branching_logic or source.branching_logic or ""
+    new_required_field = source.required_field or source.required_field or ""
+    new_custom_alignment = source.custom_alignment or source.custom_alignment or ""
+    new_field_annotation = source.field_annotation or source.field_annotation or ""
+    new_matrix_group = source.matrix_group or source.matrix_group or ""
+    new_matrix_ranking = source.matrix_ranking or source.matrix_ranking or ""
+    new_question_number = source.question_number or source.question_number or ""
+
     return {
         "new_id": new_id,
-        "new_form_name": form_name,
+        "new_form_name": source.form_name,
         "new_section": new_section or "",
         "new_field_type": field_type,
         "new_text": new_text,
-        "new_choices": choices,
-        "new_field_note": field_note,
-        "new_validation_type": "",
-        "new_validation_min": validation_min,
-        "new_validation_max": validation_max,
-        "new_identifier": "",
-        "new_branching_logic": "",
-        "new_required_field": required_field,
-        "new_custom_alignment": "",
-        "new_field_annotation": "",
+        "new_options": options,
+        "new_field_note": new_field_note,
+        "new_validation": new_validation,
+        "new_validation_min": new_validation_min,
+        "new_validation_max": new_validation_max,
+        "new_identifier": new_identifier,
+        "new_branching_logic": new_branching_logic,
+        "new_required_field": new_required_field,
+        "new_custom_alignment": new_custom_alignment,
+        "new_field_annotation": new_field_annotation,
+        "new_matrix_group": new_matrix_group,
+        "new_matrix_ranking": new_matrix_ranking,
+        "new_question_number": new_question_number,
     }
