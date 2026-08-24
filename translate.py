@@ -4,6 +4,7 @@ Isolated in its own module so the rest of the application doesn't depend
 directly on the DeepL SDK (easy to swap for another provider).
 """
 from typing import List, Optional
+from dataclasses import replace
 
 import deepl
 
@@ -54,23 +55,19 @@ class DeepLTranslator:
 
 
 def translate_questions(translator: DeepLTranslator, questions: List[Question],
-                         source_lang: Optional[str] = None) -> List[Question]:
-    """Return a new list of `Question` with the `translated_text` field filled in."""
+                        source_lang: Optional[str] = None) -> List[Question]:
+    """Return a new list of `Question` with translated fields updated, keeping all original attributes intact."""
 
     translated_sections = translator.translate_many([q.section for q in questions], source_lang=source_lang)
     translated_questions = translator.translate_many([q.question for q in questions], source_lang=source_lang)
     translated_definitions = translator.translate_many([q.definition for q in questions], source_lang=source_lang)
+
     return [
-        Question(
-            row_index=q.row_index,
-            section=q.section,
+        replace(
+            q,
             translated_section=translated_section,
-            question=q.question,
-            definition=q.definition,
-            options=q.options,
-            question_id=q.question_id,
-            translated_question= translated_question,
-            translated_definition= translated_definition,
+            translated_question=translated_question,
+            translated_definition=translated_definition,
         )
         for q, translated_section, translated_question, translated_definition in zip(
             questions, translated_sections, translated_questions, translated_definitions

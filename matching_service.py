@@ -68,7 +68,7 @@ class QuestionMatchingService:
             `app._render_question_flow`.
         allowed_row_indices : if given, only reference rows whose `row_index`
             is in this set are eligible to be returned as candidates (e.g. a
-            user-picked filter on ARC columns like Section/Body System/Form).
+            user-picked filter on ARC columns like Section/Form).
             When `None`, no restriction is applied.
 
         Note on retrieval scope: hybrid retrieval always runs over the FULL
