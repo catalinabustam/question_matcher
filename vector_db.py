@@ -26,7 +26,7 @@ _QUESTIONS_COLLECTION = "arc_questions"
 _QUES_DEF_COLLECTION = "ques_def_arc"
 
 _TEXT_COLUMNS = ["Question", "Definition"]
-_METADATA_COLUMNS = ["Form", "Section", "Question", "Body System"]
+_METADATA_COLUMNS = ["Form", "Section", "Question"]
 
 
 def create_expanded_arc_dataframe(arc_df: pd.DataFrame, lists_path: str) -> pd.DataFrame:

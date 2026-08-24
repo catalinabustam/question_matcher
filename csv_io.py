@@ -1,6 +1,5 @@
 """CSV loading and export (Repository pattern)."""
-from typing import List, Optional
-
+from typing import List, Optional, Dict
 import pandas as pd
 
 from models import MatchDecision, MatchStatus, Question
@@ -9,25 +8,32 @@ from models import MatchDecision, MatchStatus, Question
 class QuestionCsvRepository:
     """Converts a DataFrame into `Question` objects and exports decisions to CSV."""
 
-    @staticmethod
-    def load(df: pd.DataFrame, question_col: str,  definition_col: str, section_col: Optional[str],
-              options_col: Optional[str], id_col: str,
-              topic_col: Optional[str] = None,
-              answer_type_col: Optional[str] = None) -> List[Question]:
-        questions = []
-        for idx, row in df.iterrows():
-            questions.append(Question(
-                row_index=idx,
-                section=str(row[section_col]).strip() if section_col else "",
-                question=str(row[question_col]).strip(),
-                definition=str(row[definition_col]).strip() if definition_col else None,
-                options=str(row[options_col]).strip() if options_col else "",
-                question_id=str(row[id_col]).strip() if id_col else None,
-                topic=str(row[topic_col]).strip() if topic_col else None,
-                answer_type=str(row[answer_type_col]).strip() if answer_type_col else None,
-            ))
-        return questions
+    # REDCap Data Dictionary column names
+    REDCAP_COLUMNS = [
+        "Variable / Field Name", "Form Name", "Section Header", "Field Type",
+        "Field Label", "Choices, Calculations, OR Slider Labels", "Field Note",
+        "Text Validation Type OR Show Slider Number", "Text Validation Min",
+        "Text Validation Max", "Identifier?", "Branching Logic (Show field only if...)",
+        "Required Field?", "Custom Alignment", "Question Number (surveys only)",
+        "Matrix Group Name", "Matrix Ranking?", "Field Annotation",
+    ]
 
+
+    @staticmethod
+    def load(df: pd.DataFrame, column_mapping: Dict[str, str]) -> List[Question]:
+        records = df.to_dict(orient="records")
+
+        return [
+            Question(
+                row_index=idx,
+                **{
+                    field: str(row[col]).strip()
+                    for field, col in column_mapping.items()
+                    if col in row and pd.notna(row[col])
+                }
+            )
+            for idx, row in enumerate(records)
+        ]
     @staticmethod
     def export(decisions: List[MatchDecision]) -> pd.DataFrame:
         rows = []
@@ -47,13 +53,13 @@ class QuestionCsvRepository:
                     rows.append({
                         "original_section": d.source.section,
                         "original_topic": d.source.topic or "",
-                        "original_answer_type": d.source.answer_type or "",
+                        "original_answer_type": d.source.field_type or "",
                         "original_question": d.source.question,
                         "translated_question": d.source.translated_question or "",
                         "edited_translated_question": d.edited_translated_question or "",
                         "original_options": d.source.options,
                         "status": MatchStatus.MATCHED.value,
-                        "matched_reference_id": matched.question_id,
+                        "matched_reference_id": matched.variable,
                         "matched_reference_question": matched.question,
                         "new_form_name": "",
                         "new_question_id": "",
@@ -77,7 +83,7 @@ class QuestionCsvRepository:
                 rows.append({
                     "original_section": d.source.section,
                     "original_topic": d.source.topic or "",
-                    "original_answer_type": d.source.answer_type or "",
+                        "original_answer_type": d.source.field_type or "",
                     "original_question": d.source.question,
                     "translated_question": d.source.translated_question or "",
                     "edited_translated_question": d.edited_translated_question or "",
@@ -91,7 +97,7 @@ class QuestionCsvRepository:
                     "new_question_section": d.new_section,
                     "new_field_type": d.new_field_type,
                     "new_question_text": d.new_text,
-                    "new_choices": d.new_choices,
+                    "new_choices": d.new_options,
                     "new_field_note": d.new_field_note,
                     "new_validation_type": d.new_validation_type,
                     "new_validation_min": d.new_validation_min,
@@ -101,6 +107,9 @@ class QuestionCsvRepository:
                     "new_required_field": d.new_required_field,
                     "new_custom_alignment": d.new_custom_alignment,
                     "new_field_annotation": d.new_field_annotation,
+                    "new_matrix_group_name": d.new_matrix_group_name,
+                    "new_matrix_ranking": d.new_matrix_ranking,
+                    "new_question_number": d.new_question_number,
                     "final_question": d.new_text,
                 })
 
