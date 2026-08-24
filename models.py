@@ -16,23 +16,25 @@ class MatchStatus(str, Enum):
 @dataclass(frozen=True)
 class Question:
     """A question coming from a CSV (source or reference)."""
+    
+    # Required core fields
     row_index: int
     question: str
-    question_id: str
+    variable: str
+    
+    # Optional generic fields
     section: Optional[str] = None
     definition: Optional[str] = None
     options: Optional[str] = None
     translated_section: Optional[str] = None
     translated_question: Optional[str] = None
     translated_definition: Optional[str] = None
-    topic: Optional[str] = None
-    answer_type: Optional[str] = None
-    # Data dictionary fields (for newly created questions)
+    topic: Optional[str] = None    
+    # Optional REDCap Data Dictionary fields
     form_name: Optional[str] = None
     field_type: Optional[str] = None
-    choices: Optional[str] = None
     field_note: Optional[str] = None
-    validation_type: Optional[str] = None
+    validation: Optional[str] = None
     validation_min: Optional[str] = None
     validation_max: Optional[str] = None
     identifier: Optional[str] = None
@@ -40,7 +42,9 @@ class Question:
     required_field: Optional[str] = None
     custom_alignment: Optional[str] = None
     field_annotation: Optional[str] = None
-
+    matrix_group: Optional[str] = None
+    matrix_ranking: Optional[str] = None
+    question_number: Optional[str] = None
 
 @dataclass
 class MatchCandidate:
@@ -62,7 +66,7 @@ class MatchDecision:
     # Data dictionary fields for newly created questions
     new_form_name: str = ""
     new_field_type: str = ""
-    new_choices: str = ""
+    new_options: str = ""
     new_field_note: str = ""
     new_validation_type: str = ""
     new_validation_min: str = ""
