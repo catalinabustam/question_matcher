@@ -25,7 +25,7 @@ from matching_service import QuestionMatchingService
 from models import MatchDecision, MatchStatus
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
-from translate import DeepLTranslator, translate_questions
+from translate import DeepLTranslator, OllamaTranslator, translate_questions
 from dotenv import load_dotenv
 from vector_db import (
     EMBEDDING_MODEL,
@@ -351,21 +351,52 @@ def _render_sidebar_upload():
 
 
 def _render_translation_form():
-    st.sidebar.header("2. Translation (DeepL)")
+    st.sidebar.header("2. Translation")
     use_translation = st.sidebar.checkbox(
         "Translate source CSV questions before comparing", value=False
     )
 
-    source_lang = None
+    translator_type = "DeepL"
     api_key = ""
-    if use_translation:
-        api_key = os.getenv("DEEPL_API_KEY", "")
-        source_choice = st.sidebar.selectbox(
-            "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
-        )
-        source_lang = None if source_choice == AUTO_DETECT else source_choice
+    ollama_model = None
+    ollama_base_url = "http://localhost:11434"
+    source_lang = None
 
-    return use_translation, api_key, source_lang
+    if use_translation:
+        translator_type = st.sidebar.selectbox(
+            "Translation provider", ["DeepL", "Ollama"], index=0
+        )
+
+        if translator_type == "DeepL":
+            api_key = os.getenv("DEEPL_API_KEY", "")
+            source_choice = st.sidebar.selectbox(
+                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
+            )
+            source_lang = None if source_choice == AUTO_DETECT else source_choice
+        else:  # Ollama
+            ollama_base_url = st.sidebar.text_input(
+                "Ollama base URL", value="http://localhost:11434"
+            )
+            # Fetch available models
+            try:
+                available_models = OllamaTranslator.get_available_models(ollama_base_url)
+            except Exception:
+                available_models = []
+
+            if available_models:
+                ollama_model = st.sidebar.selectbox(
+                    "Ollama model", available_models, index=0
+                )
+            else:
+                st.sidebar.warning("No Ollama models found. Make sure Ollama is running.")
+                ollama_model = st.sidebar.text_input("Model name (manual)", value="llama3.2")
+
+            source_choice = st.sidebar.selectbox(
+                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
+            )
+            source_lang = None if source_choice == AUTO_DETECT else source_choice
+
+    return use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang
 
 
 def _render_search_scope(reference_df: pd.DataFrame) -> dict:
@@ -1190,7 +1221,7 @@ def main():
     st.title("Question Matcher against a Reference Catalog")
 
     separator, source_file = _render_sidebar_upload()
-    use_translation, api_key, source_lang = _render_translation_form()
+    use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang = _render_translation_form()
 
     if st.sidebar.button("Reset"):
         _reset_session()
@@ -1249,13 +1280,23 @@ def main():
 
                 if use_translation:
                     try:
-                        translator = DeepLTranslator(api_key)
-                        with st.spinner("Translating questions with DeepL..."):
-                            source_qs = translate_questions(
-                                translator, questions=source_qs, source_lang=source_lang
-                            )
+                        if translator_type == "DeepL":
+                            translator = DeepLTranslator(api_key)
+                            with st.spinner("Translating questions with DeepL..."):
+                                source_qs = translate_questions(
+                                    translator, questions=source_qs, source_lang=source_lang
+                                )
+                        else:  # Ollama
+                            if not ollama_model:
+                                st.error("Please select an Ollama model.")
+                                return
+                            translator = OllamaTranslator(ollama_model, ollama_base_url)
+                            with st.spinner(f"Translating questions with Ollama ({ollama_model})..."):
+                                source_qs = translate_questions(
+                                    translator, questions=source_qs, source_lang=source_lang
+                                )
                     except Exception as exc:
-                        st.error(f"Error translating with DeepL: {exc}")
+                        st.error(f"Error translating: {exc}")
                         return
 
                 matcher = QuestionMatchingService(
