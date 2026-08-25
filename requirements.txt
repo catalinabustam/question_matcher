@@ -7,3 +7,4 @@ chromadb>=0.5
 sentence-transformers>=3.0
 bm25s>=0.2
 PyStemmer>=2.2
+ollama>=0.3
