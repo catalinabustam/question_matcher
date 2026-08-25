@@ -10,12 +10,12 @@ To change how new questions are built, edit this module directly.
 """
 
 import re
-from collections.abc import Iterable, Mapping
 from typing import Any
+
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 from datadictionary import _KEPT_FIELD_TYPES
 from models import Question
-from sklearn.feature_extraction.text import TfidfVectorizer
 
 # --------------------------------------------------------------------------- #
 # ARC-style variable naming: `[domain]_[topic]_[detail]`
@@ -73,29 +73,27 @@ def _domain_code(section: str | None) -> str:
 
 def _topic_code(question: str) -> list[str]:
     # Clean non-alphanumeric characters
-    cleaned_text = re.sub(r'[^a-zA-Z\s]', '', question.lower())
-    
+    cleaned_text = re.sub(r"[^a-zA-Z\s]", "", question.lower())
+
     # Initialize TF-IDF Vectorizer with English stop words removal
-    vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
-    
+    vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+
     # Fit and transform the text
     tfidf_matrix = vectorizer.fit_transform([cleaned_text])
     feature_names = vectorizer.get_feature_names_out()
     scores = tfidf_matrix.toarray()[0]
-    
+
     # Rank words by highest TF-IDF score
     word_score_pairs = list(zip(feature_names, scores))
     sorted_pairs = sorted(word_score_pairs, key=lambda x: x[1], reverse=True)
 
     second_topic, score = sorted_pairs[1]
-    
+
     return second_topic.replace(" ", "")[:_TOPIC_MAX_LEN]
 
 
 def build_variable_name(
-    section: str | None,
-    question: str,
-    existing_ids: set[str] | None = None
+    section: str | None, question: str, existing_ids: set[str] | None = None
 ) -> str:
     """Build an ARC-style `domain_topic[_detail]` variable name.
 
@@ -146,22 +144,24 @@ def build_new_question(
     source: Question,
     sequence: int,
     section: str | None = None,
-    existing_ids: set[str] | None = None
+    existing_ids: set[str] | None = None,
 ) -> dict[str, Any]:
 
     del sequence  # kept for backward-compatible call signature; see docstring
 
     answer_type = source.field_type or infer_answer_type(source.options or "")
-    new_section = section if section is not None else source.section or source.translated_section  
+    new_section = (
+        section if section is not None else source.section or source.translated_section
+    )
     new_id = source.variable or build_variable_name(
         section=new_section,
         question=source.translated_question or source.question,
-        existing_ids=existing_ids
+        existing_ids=existing_ids,
     )
 
     # Default field_type to "text" if not provided, but validate against REDCap allowed types
     field_type = source.field_type if source.field_type in _KEPT_FIELD_TYPES else "text"
-   
+
     options = source.options or ""
 
     # Use translated question if available, otherwise fall back to original
@@ -189,7 +189,7 @@ def build_new_question(
         "new_text": new_text,
         "new_options": options,
         "new_field_note": new_field_note,
-        "new_validation": new_validation,
+        "new_validation_type": new_validation,
         "new_validation_min": new_validation_min,
         "new_validation_max": new_validation_max,
         "new_identifier": new_identifier,
