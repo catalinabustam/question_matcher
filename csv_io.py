@@ -4,7 +4,11 @@ from typing import ClassVar
 
 import pandas as pd
 
-from datadictionary import _source_field_value
+from datadictionary import (
+    _source_field_value,
+    build_variable_rename_map,
+    rename_variable_references,
+)
 from models import MatchDecision, MatchStatus, Question
 
 _OVERRIDABLE_FIELDS = ("question", "options", "field_type", "validation")
@@ -68,6 +72,13 @@ class QuestionCsvRepository:
     @staticmethod
     def export(decisions: list[MatchDecision]) -> pd.DataFrame:
         rows = []
+        # Any source question that got matched to a different ARC variable,
+        # or created under an auto-generated ARC-style name, may still be
+        # referenced by its *original* name in another question's branching
+        # logic / calculation formula. Renaming those references is a single
+        # pass over all decisions, done once up front.
+        rename_map = build_variable_rename_map(decisions)
+
         for d in decisions:
             # Questions the user explicitly marked "ignore" are left out of
             # the export entirely — they never get a row in the final CSV.
@@ -155,16 +166,25 @@ class QuestionCsvRepository:
                         "new_question_section": d.new_section,
                         "new_field_type": d.new_field_type,
                         "new_question_text": d.new_text,
-                        "new_choices": d.new_options,
+                        # `new_choices` only actually contains `[variable]`
+                        # references for calc-type rows; renaming is a no-op
+                        # for plain "code, label" choice text.
+                        "new_choices": rename_variable_references(
+                            d.new_options, rename_map
+                        ),
                         "new_field_note": d.new_field_note,
                         "new_validation_type": d.new_validation_type,
                         "new_validation_min": d.new_validation_min,
                         "new_validation_max": d.new_validation_max,
                         "new_identifier": d.new_identifier,
-                        "new_branching_logic": d.new_branching_logic,
+                        "new_branching_logic": rename_variable_references(
+                            d.new_branching_logic, rename_map
+                        ),
                         "new_required_field": d.new_required_field,
                         "new_custom_alignment": d.new_custom_alignment,
-                        "new_field_annotation": d.new_field_annotation,
+                        "new_field_annotation": rename_variable_references(
+                            d.new_field_annotation, rename_map
+                        ),
                         "new_matrix_group_name": d.new_matrix_group_name,
                         "new_matrix_ranking": d.new_matrix_ranking,
                         "new_question_number": d.new_question_number,
