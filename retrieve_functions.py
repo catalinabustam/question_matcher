@@ -5,14 +5,15 @@ Ported from the exploratory `hybrid_search.ipynb` notebook and wired to work
 with the two dense collections and the bm25s index that are built once at
 application startup (see `vector_db.py` and `bm25.py`).
 """
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from bm25 import bm25s_retrieve
 
 
-def dense_retrieve(query: str, collection, top_k: int = 10) -> List[Tuple[str, float]]:
+def dense_retrieve(query: str, collection, top_k: int = 10,
+                   where: Optional[dict] = None) -> List[Tuple[str, float]]:
     """Retrieve top-k `(doc_id, similarity)` pairs from a ChromaDB collection."""
-    results = collection.query(query_texts=[query], n_results=top_k)
+    results = collection.query(query_texts=[query], n_results=top_k, where=where)
     ids = results["ids"][0]
     distances = results["distances"][0]
     # Cosine distance -> similarity
@@ -21,7 +22,8 @@ def dense_retrieve(query: str, collection, top_k: int = 10) -> List[Tuple[str, f
 def joint_dense_retrieve(
     query: str, 
     dense_collections: List,
-    top_k: int = 5
+    top_k: int = 5,
+    where: Optional[dict] = None,
 ) -> List[Tuple[str, float]]:
     """
     Query two ChromaDB collections, keep the maximum score for each document ID,
@@ -34,7 +36,7 @@ def joint_dense_retrieve(
     for collection in dense_collections:
         if collection is None:
             raise ValueError("Collection cannot be None")
-        results.append(dense_retrieve(query, collection=collection, top_k=top_k))
+        results.append(dense_retrieve(query, collection=collection, top_k=top_k, where=where))
     
     # 2. Track the maximum score per document ID
     max_scores = {}
@@ -85,7 +87,9 @@ def hybrid_retrieve(
     stemmer=None,
     documents=None,
     doc_ids= None,
-    top_k: int = 5
+    top_k: int = 5,
+    where: Optional[dict] = None,
+    allowed_doc_ids: Optional[Set[str]] = None,
 ) -> List[Dict]:
     """Full hybrid retrieval: BM25 + dense via ChromaDB, fused with weighted RRF."""
     results = []
@@ -95,9 +99,22 @@ def hybrid_retrieve(
     #         raise ValueError("Collection cannot be None")
     #     results.append(dense_retrieve(query, collection=collection, top_k=len(documents)))
     
-    results = joint_dense_retrieve(query, dense_collections=densecollections, top_k=len(documents)) 
+    search_size = len(allowed_doc_ids) if allowed_doc_ids is not None else len(documents)
+    if search_size == 0:
+        return []
+
+    results = joint_dense_retrieve(
+        query, dense_collections=densecollections, top_k=search_size, where=where
+    )
      
-    bm25s_results = bm25s_retrieve(query, retriever=retrieverbm25, doc_ids=doc_ids, stemmer=stemmer, top_k=len(documents))
+    bm25s_results = bm25s_retrieve(
+        query,
+        retriever=retrieverbm25,
+        doc_ids=doc_ids,
+        stemmer=stemmer,
+        top_k=search_size,
+        allowed_doc_ids=allowed_doc_ids,
+    )
 
     hybrid_results = [results] + [bm25s_results]
 
