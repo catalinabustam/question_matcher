@@ -16,6 +16,11 @@ the final dictionary:
    its own row, pulled from the *original* (non-expanded) ARC catalog if
    it isn't already present.
 
+A fourth step then renames any leftover references to a source question's
+*original* variable name — inside Branching Logic, Field Annotation, and
+calculation formulas — to whatever name that question ended up with in the
+export (see `build_variable_rename_map` / `rename_variable_references`).
+
 Input rows must come from the ARC catalog (same columns as `ARC.csv`:
 `Form`, `Section`, `Variable`, `Type`, `Question`, `Answer Options`,
 `Validation`, `Minimum`, `Maximum`, `Skip Logic`) — the same schema
@@ -107,11 +112,28 @@ _FIELDNAME_COLUMN = "Variable / Field Name"
 _FORM_COLUMN = "Form Name"
 _SECTION_COLUMN = "Section Header"
 _BRANCHING_LOGIC_COLUMN = "Branching Logic (Show field only if...)"
+_CHOICES_COLUMN = "Choices, Calculations, OR Slider Labels"
+_FIELD_ANNOTATION_COLUMN = "Field Annotation"
 
-# Matches the variable name inside a branching-logic reference, e.g. pulls
-# "pres_firstsym" out of both "[pres_firstsym]='1'" and the checkbox form
-# "[pres_firstsym(88)]='1'" (word chars stop right before the "(").
+# Matches the variable name inside a branching-logic or calculation
+# reference, e.g. pulls "pres_firstsym" out of both "[pres_firstsym]='1'"
+# and the checkbox form "[pres_firstsym(88)]='1'" (word chars stop right
+# before the "("), while keeping whatever comes right after it (the closing
+# "]" or the opening "(") so a replacement can be spliced back in untouched.
 _VARIABLE_REFERENCE_RE = re.compile(r"\[(\w+)")
+_VARIABLE_REFERENCE_WITH_SUFFIX_RE = re.compile(r"\[(\w+)(\]|\()")
+
+# Columns that can contain `[variable]`-style references to other rows and
+# so need renaming when a referenced variable's name changes (see
+# `build_variable_rename_map`). The Choices column only actually contains
+# such references for `calc`-type rows, but scanning it unconditionally is
+# harmless: plain choice text (e.g. "1, Yes | 2, No") never matches the
+# `[variable]` pattern.
+_RENAMABLE_COLUMNS = (
+    _BRANCHING_LOGIC_COLUMN,
+    _FIELD_ANNOTATION_COLUMN,
+    _CHOICES_COLUMN,
+)
 
 # Maps a MatchDecision.field_overrides key to the ARC source column it
 # overrides when the decision picks "source" instead of "arc" for that field.
@@ -264,7 +286,16 @@ def _build_core(rows: pd.DataFrame, lists_path: str = "ARC_Lists/") -> pd.DataFr
 
 
 def _referenced_variables(branching_logic: str) -> set:
-    return set(_VARIABLE_REFERENCE_RE.findall(branching_logic or ""))
+    if not isinstance(branching_logic, str):
+        return set()
+    return set(_VARIABLE_REFERENCE_RE.findall(branching_logic))
+
+
+def _row_references(row: pd.Series) -> set:
+    references = set()
+    for column in _RENAMABLE_COLUMNS:
+        references |= _referenced_variables(row.get(column, ""))
+    return references
 
 
 def _add_missing_branching_logic_rows(
@@ -274,9 +305,9 @@ def _add_missing_branching_logic_rows(
 
     Some fields' branching logic references variables that never made it
     into the dictionary as their own row. For each such variable, pull its
-    row from the *original* (non-expanded) ARC catalog and append it —
-    repeating, since a newly added row can itself reference further
-    variables — until nothing new turns up.
+    row from the *original* (non-expanded) ARC catalog and insert it directly
+    before the row that references it. Newly inserted rows may reference
+    further variables, so their dependencies are inserted first.
     """
     if arc_catalog.empty:
         return df
@@ -288,26 +319,65 @@ def _add_missing_branching_logic_rows(
         .set_index("Variable")
     )
 
-    # Tracks every variable we've already looked up, whether or not it
-    # ended up producing a kept row, so a variable whose Field Type gets
-    # filtered out by `_build_core` can't be re-attempted forever.
-    resolved: set = set()
+    known = set(df[_FIELDNAME_COLUMN])
+    inserted: set = set()
+    resolving: set = set()
+    output_parts: list[pd.DataFrame] = []
 
-    while True:
-        known = set(df[_FIELDNAME_COLUMN])
-        referenced: set = set()
-        for logic in df[_BRANCHING_LOGIC_COLUMN]:
-            referenced |= _referenced_variables(logic)
+    def append_with_dependencies(row: pd.DataFrame) -> None:
+        for variable in _row_references(row.iloc[0]):
+            if variable in known or variable in inserted:
+                continue
+            if variable not in arc_rows_by_variable.index or variable in resolving:
+                continue
 
-        to_resolve = (referenced - known - resolved) & set(arc_rows_by_variable.index)
-        if not to_resolve:
-            return df
+            resolving.add(variable)
+            dependency = _build_core(
+                arc_rows_by_variable.loc[[variable]].reset_index()
+            )
+            if not dependency.empty:
+                append_with_dependencies(dependency)
+                inserted.add(variable)
+            resolving.remove(variable)
 
-        resolved |= to_resolve
-        missing_rows = arc_rows_by_variable.loc[sorted(to_resolve)].reset_index()
-        added = _build_core(missing_rows)
-        if not added.empty:
-            df = pd.concat([df, added], ignore_index=True)
+        output_parts.append(row)
+
+    for row_index in range(len(df)):
+        append_with_dependencies(df.iloc[[row_index]])
+
+    return pd.concat(output_parts, ignore_index=True) if output_parts else df
+
+
+def _order_rows_by_dependencies(df: pd.DataFrame) -> pd.DataFrame:
+    """Place every referenced variable before the row that uses it."""
+    row_by_variable = {
+        variable: row_index
+        for row_index, variable in enumerate(df[_FIELDNAME_COLUMN])
+        if variable
+    }
+    ordered_indices: list[int] = []
+    added: set[int] = set()
+    resolving: set[int] = set()
+
+    def add_row(row_index: int) -> None:
+        if row_index in added:
+            return
+        if row_index in resolving:
+            return
+
+        resolving.add(row_index)
+        for variable in _row_references(df.iloc[row_index]):
+            dependency_index = row_by_variable.get(variable)
+            if dependency_index is not None:
+                add_row(dependency_index)
+        resolving.remove(row_index)
+        added.add(row_index)
+        ordered_indices.append(row_index)
+
+    for row_index in range(len(df)):
+        add_row(row_index)
+
+    return df.iloc[ordered_indices].reset_index(drop=True)
 
 
 def _drop_duplicate_fieldnames(df: pd.DataFrame) -> pd.DataFrame:
@@ -350,6 +420,74 @@ def _dedupe_section_headers(df: pd.DataFrame) -> pd.DataFrame:
     )
     df = df.fillna("")
     df[_SECTION_COLUMN] = df[_SECTION_COLUMN].replace({"": np.nan})
+    return df
+
+
+def build_variable_rename_map(decisions: list[MatchDecision]) -> dict[str, str]:
+    """Map each source question's *original* variable name to whatever name
+    it ended up with in the export/data dictionary, for every decision
+    where that name actually changed.
+
+    - MATCHED (exactly one candidate): `source.variable` -> the matched
+      ARC row's `variable`, since the source question is now represented by
+      that ARC row instead of its own name. Decisions matched to zero or
+      several candidates are skipped — there's no single unambiguous new
+      name to point references at.
+    - CREATED / MATCHED_CREATED: `source.variable` -> `decision.new_id`,
+      since the newly created question may carry an ARC-style
+      auto-generated name instead of the source's original one.
+
+    Used by `build_data_dictionary` (and `csv_io.QuestionCsvRepository`) to
+    keep Branching Logic / calculation formulas elsewhere in the export
+    pointing at the right variable after a rename, without touching
+    anything else in those formulas.
+    """
+    rename_map: dict[str, str] = {}
+    for decision in decisions:
+        old_name = decision.source.variable
+        if not old_name:
+            continue
+
+        if decision.status == MatchStatus.MATCHED:
+            matched = decision.matched_questions
+            if len(matched) == 1 and matched[0].variable and matched[0].variable != old_name:
+                rename_map[old_name] = matched[0].variable
+        elif decision.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED):
+            if decision.new_id and decision.new_id != old_name:
+                rename_map[old_name] = decision.new_id
+
+    return rename_map
+
+
+def rename_variable_references(text: str, rename_map: dict[str, str]) -> str:
+    """Replace `[old_var]` / `[old_var(...)]` references in a branching-logic
+    or calculation formula with the renamed variable from `rename_map`.
+
+    Only the variable-name token inside the brackets is swapped — the
+    brackets themselves, any suffix (e.g. the `(88)` checkbox-option form),
+    and every other operator/value/reference in the formula are left
+    exactly as they were.
+    """
+    if not text or not rename_map:
+        return text
+
+    def _sub(match: re.Match) -> str:
+        variable, suffix = match.group(1), match.group(2)
+        return f"[{rename_map.get(variable, variable)}{suffix}"
+
+    return _VARIABLE_REFERENCE_WITH_SUFFIX_RE.sub(_sub, text)
+
+
+def _apply_variable_renames(df: pd.DataFrame, rename_map: dict[str, str]) -> pd.DataFrame:
+    """Apply `rename_variable_references` across every renamable column."""
+    if not rename_map:
+        return df
+
+    df = df.copy()
+    for column in _RENAMABLE_COLUMNS:
+        df[column] = df[column].apply(
+            lambda text: rename_variable_references(text, rename_map)
+        )
     return df
 
 
@@ -506,15 +644,19 @@ def build_data_dictionary(
         `Variable`), used to look up rows for variables referenced only in
         someone else's branching logic (see `_add_missing_branching_logic_rows`).
     decisions : every `MatchDecision` made in the session — used to apply
-        per-field ARC-vs-source overrides to `matched_rows` and to build
-        rows for CREATED/MATCHED_CREATED questions (both are otherwise
-        absent from `matched_rows`, which only ever holds ARC catalog rows).
+        per-field ARC-vs-source overrides to `matched_rows`, to build rows
+        for CREATED/MATCHED_CREATED questions (both are otherwise absent
+        from `matched_rows`, which only ever holds ARC catalog rows), and to
+        rename any leftover references to a renamed variable (see
+        `build_variable_rename_map`).
 
     Mirrors `generate.py`'s `_generate_crf` + `_custom_alignment` and the
-    descriptive-label wrapping from `on_generate_click`, plus three extra
+    descriptive-label wrapping from `on_generate_click`, plus four extra
     rules applied to the final result: no duplicate field names, forms
-    grouped into sequential blocks, and every branching-logic variable
-    present as its own row.
+    grouped into sequential blocks, every branching-logic variable present
+    as its own row, and every Branching Logic / Field Annotation / calc
+    formula updated to reference variables by their final (possibly
+    renamed) name.
     """
     matched_rows = _apply_field_overrides(matched_rows, decisions)
     matched_part = _build_core(matched_rows)
@@ -527,6 +669,10 @@ def build_data_dictionary(
     df = _add_missing_branching_logic_rows(df, arc_catalog)
     df = _drop_duplicate_fieldnames(df)
     df = _make_forms_sequential(df)
+    df = _order_rows_by_dependencies(df)
     df = _dedupe_section_headers(df)
+
+    rename_map = build_variable_rename_map(decisions)
+    df = _apply_variable_renames(df, rename_map)
 
     return df.fillna("")
