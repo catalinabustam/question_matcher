@@ -21,11 +21,14 @@ Input rows must come from the ARC catalog (same columns as `ARC.csv`:
 `Validation`, `Minimum`, `Maximum`, `Skip Logic`) — the same schema
 `generate.py` expects.
 """
+
 import os
 import re
 
 import numpy as np
 import pandas as pd
+
+from models import MatchDecision, MatchStatus
 
 _DESCRIPTIVE_LABEL_TEMPLATE = (
     '<div class="rich-text-field-label"><h5 style="text-align: center;">'
@@ -33,31 +36,66 @@ _DESCRIPTIVE_LABEL_TEMPLATE = (
 )
 
 _KEPT_FIELD_TYPES = [
-    "text", "notes", "radio", "dropdown", "calc", "file",
-    "checkbox", "yesno", "truefalse", "descriptive", "slider",
+    "text",
+    "notes",
+    "radio",
+    "dropdown",
+    "calc",
+    "file",
+    "checkbox",
+    "yesno",
+    "truefalse",
+    "descriptive",
+    "slider",
 ]
 
 _TEXT_ONLY_TYPES = ["date_dmy", "number", "integer", "datetime_dmy"]
 
 _SOURCE_COLUMNS = [
-    "Form", "Section", "Variable", "Type", "Question",
-    "Answer Options", "Validation", "Minimum", "Maximum", "Skip Logic",
+    "Form",
+    "Section",
+    "Variable",
+    "Type",
+    "Question",
+    "Answer Options",
+    "Validation",
+    "Minimum",
+    "Maximum",
+    "Skip Logic",
 ]
 
 _CRF_COLUMNS = [
-    "Form Name", "Section Header", "Variable / Field Name", "Field Type",
-    "Field Label", "Choices, Calculations, OR Slider Labels",
-    "Text Validation Type OR Show Slider Number", "Text Validation Min",
-    "Text Validation Max", "Branching Logic (Show field only if...)",
+    "Form Name",
+    "Section Header",
+    "Variable / Field Name",
+    "Field Type",
+    "Field Label",
+    "Choices, Calculations, OR Slider Labels",
+    "Text Validation Type OR Show Slider Number",
+    "Text Validation Min",
+    "Text Validation Max",
+    "Branching Logic (Show field only if...)",
 ]
 
 _REDCAP_COLUMNS = [
-    "Variable / Field Name", "Form Name", "Section Header", "Field Type",
-    "Field Label", "Choices, Calculations, OR Slider Labels", "Field Note",
-    "Text Validation Type OR Show Slider Number", "Text Validation Min",
-    "Text Validation Max", "Identifier?", "Branching Logic (Show field only if...)",
-    "Required Field?", "Custom Alignment", "Question Number (surveys only)",
-    "Matrix Group Name", "Matrix Ranking?", "Field Annotation",
+    "Variable / Field Name",
+    "Form Name",
+    "Section Header",
+    "Field Type",
+    "Field Label",
+    "Choices, Calculations, OR Slider Labels",
+    "Field Note",
+    "Text Validation Type OR Show Slider Number",
+    "Text Validation Min",
+    "Text Validation Max",
+    "Identifier?",
+    "Branching Logic (Show field only if...)",
+    "Required Field?",
+    "Custom Alignment",
+    "Question Number (surveys only)",
+    "Matrix Group Name",
+    "Matrix Ranking?",
+    "Field Annotation",
 ]
 
 _SYMPT_DN4_ANNOTATION = (
@@ -74,6 +112,15 @@ _BRANCHING_LOGIC_COLUMN = "Branching Logic (Show field only if...)"
 # "pres_firstsym" out of both "[pres_firstsym]='1'" and the checkbox form
 # "[pres_firstsym(88)]='1'" (word chars stop right before the "(").
 _VARIABLE_REFERENCE_RE = re.compile(r"\[(\w+)")
+
+# Maps a MatchDecision.field_overrides key to the ARC source column it
+# overrides when the decision picks "source" instead of "arc" for that field.
+_OVERRIDE_COLUMNS = {
+    "question": "Question",
+    "options": "Answer Options",
+    "field_type": "Type",
+    "validation": "Validation",
+}
 
 
 def _reorder_with_other_options(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,7 +183,15 @@ def _build_core(rows: pd.DataFrame, lists_path: str = "ARC_Lists/") -> pd.DataFr
     if "List" in full_df.columns:
         list_vals = full_df["List"].fillna("").astype(str).reset_index(drop=True)
         # synonyms that should be coded as 99 and placed at the end
-        unknown_synonyms = {"unknown", "dont know", "don't know", "not known", "n/a", "na", "missing"}
+        unknown_synonyms = {
+            "unknown",
+            "dont know",
+            "don't know",
+            "not known",
+            "n/a",
+            "na",
+            "missing",
+        }
         for i, list_identifier in list_vals.items():
             if not list_identifier:
                 continue
@@ -186,9 +241,9 @@ def _build_core(rows: pd.DataFrame, lists_path: str = "ARC_Lists/") -> pd.DataFr
     df = df.reindex(columns=_REDCAP_COLUMNS).astype(object)
 
     if "sympt_dn4_result" in df[_FIELDNAME_COLUMN].values:
-        df.loc[
-            df[_FIELDNAME_COLUMN] == "sympt_dn4_result", "Field Annotation"
-        ] = _SYMPT_DN4_ANNOTATION
+        df.loc[df[_FIELDNAME_COLUMN] == "sympt_dn4_result", "Field Annotation"] = (
+            _SYMPT_DN4_ANNOTATION
+        )
 
     df.loc[df["Field Type"].isin(_TEXT_ONLY_TYPES), "Field Type"] = "text"
     df = df.loc[df["Field Type"].isin(_KEPT_FIELD_TYPES)]
@@ -201,9 +256,9 @@ def _build_core(rows: pd.DataFrame, lists_path: str = "ARC_Lists/") -> pd.DataFr
     df = _custom_alignment(df)
 
     descriptive_mask = df["Field Type"] == "descriptive"
-    df.loc[descriptive_mask, "Field Label"] = df.loc[descriptive_mask, "Field Label"].apply(
-        lambda label: _DESCRIPTIVE_LABEL_TEMPLATE.format(label=label)
-    )
+    df.loc[descriptive_mask, "Field Label"] = df.loc[
+        descriptive_mask, "Field Label"
+    ].apply(lambda label: _DESCRIPTIVE_LABEL_TEMPLATE.format(label=label))
 
     return df
 
@@ -212,7 +267,9 @@ def _referenced_variables(branching_logic: str) -> set:
     return set(_VARIABLE_REFERENCE_RE.findall(branching_logic or ""))
 
 
-def _add_missing_branching_logic_rows(df: pd.DataFrame, arc_catalog: pd.DataFrame) -> pd.DataFrame:
+def _add_missing_branching_logic_rows(
+    df: pd.DataFrame, arc_catalog: pd.DataFrame
+) -> pd.DataFrame:
     """Add a row for every branching-logic variable missing from column A.
 
     Some fields' branching logic references variables that never made it
@@ -255,7 +312,9 @@ def _add_missing_branching_logic_rows(df: pd.DataFrame, arc_catalog: pd.DataFram
 
 def _drop_duplicate_fieldnames(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only the first row for each Variable / Field Name."""
-    return df.drop_duplicates(subset=_FIELDNAME_COLUMN, keep="first").reset_index(drop=True)
+    return df.drop_duplicates(subset=_FIELDNAME_COLUMN, keep="first").reset_index(
+        drop=True
+    )
 
 
 def _make_forms_sequential(df: pd.DataFrame) -> pd.DataFrame:
@@ -266,7 +325,9 @@ def _make_forms_sequential(df: pd.DataFrame) -> pd.DataFrame:
     first-appearance order (stable sort), so each form's own internal row
     order is preserved.
     """
-    form_rank = {form: rank for rank, form in enumerate(dict.fromkeys(df[_FORM_COLUMN]))}
+    form_rank = {
+        form: rank for rank, form in enumerate(dict.fromkeys(df[_FORM_COLUMN]))
+    }
     return (
         df.assign(_form_rank=df[_FORM_COLUMN].map(form_rank))
         .sort_values("_form_rank", kind="stable")
@@ -292,8 +353,149 @@ def _dedupe_section_headers(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_data_dictionary(matched_rows: pd.DataFrame, arc_catalog: pd.DataFrame) -> pd.DataFrame:
-    """Convert matched ARC catalog rows into a REDCap-style data dictionary.
+def available_field_types(arc_catalog_df: pd.DataFrame) -> list[str]:
+    """Field types to offer for a new/overridden question, grounded in what
+    the ARC catalog actually uses.
+
+    Normalizes the catalog's `Type` column the same way `_build_core` does
+    (`user_list`/`list` -> `radio`, `multi_list` -> `checkbox`) and keeps
+    only REDCap-valid types (`_KEPT_FIELD_TYPES`). Falls back to the full
+    kept list if the catalog has nothing usable, so the dropdown is never
+    empty.
+    """
+    if (
+        arc_catalog_df is None
+        or arc_catalog_df.empty
+        or "Type" not in arc_catalog_df.columns
+    ):
+        return list(_KEPT_FIELD_TYPES)
+
+    seen = set(arc_catalog_df["Type"].dropna().astype(str))
+    normalized = {
+        "radio"
+        if t in ("user_list", "list")
+        else "checkbox"
+        if t == "multi_list"
+        else t
+        for t in seen
+    }
+    kept = sorted(normalized & set(_KEPT_FIELD_TYPES))
+    return kept or list(_KEPT_FIELD_TYPES)
+
+
+def _source_field_value(decision: MatchDecision, key: str) -> str:
+    """The source-question value for one of the four overridable fields."""
+    source = decision.source
+    if key == "question":
+        return (
+            decision.edited_translated_question
+            or source.translated_question
+            or source.question
+            or ""
+        )
+    if key == "options":
+        return source.options or ""
+    if key == "field_type":
+        return source.field_type or ""
+    if key == "validation":
+        return source.validation or ""
+    return ""
+
+
+def _apply_field_overrides(
+    matched_rows: pd.DataFrame, decisions: list[MatchDecision]
+) -> pd.DataFrame:
+    """Overwrite ARC row cells with the source value for any field a
+    MATCHED/MATCHED_CREATED decision picked "source" for.
+
+    Only decisions matched to exactly one ARC question carry overrides (see
+    `MatchDecision.field_overrides`) — mixing per-field against multiple ARC
+    rows isn't meaningful, so anything else is left untouched.
+    """
+    if matched_rows.empty:
+        return matched_rows
+
+    df = matched_rows.copy()
+    for decision in decisions:
+        if not decision.field_overrides:
+            continue
+        matched = decision.matched_questions
+        if len(matched) != 1:
+            continue
+        mask = df["Variable"] == matched[0].variable
+        if not mask.any():
+            continue
+        for key, column in _OVERRIDE_COLUMNS.items():
+            if decision.field_overrides.get(key) == "source":
+                df.loc[mask, column] = _source_field_value(decision, key)
+    return df
+
+
+def _created_question_rows(decisions: list[MatchDecision]) -> pd.DataFrame:
+    """REDCap rows for every CREATED/MATCHED_CREATED decision's new question.
+
+    Built from `decision.new_*` fields: mapped into the ARC schema and run
+    through `_build_core` so checkbox/slider/descriptive formatting matches
+    matched rows exactly, then overlaid with the REDCap-only columns that
+    schema doesn't carry (Field Note, Identifier?, Required Field?, ...).
+    """
+    created = [
+        d
+        for d in decisions
+        if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
+    ]
+    if not created:
+        return pd.DataFrame(columns=_REDCAP_COLUMNS)
+
+    source_rows = pd.DataFrame(
+        [
+            {
+                "Form": d.new_form_name,
+                "Section": d.new_section,
+                "Variable": d.new_id,
+                "Type": d.new_field_type,
+                "Question": d.new_text,
+                "Answer Options": d.new_options,
+                "Validation": d.new_validation_type,
+                "Minimum": d.new_validation_min,
+                "Maximum": d.new_validation_max,
+                "Skip Logic": d.new_branching_logic,
+            }
+            for d in created
+        ]
+    )
+
+    df = _build_core(source_rows)
+    if df.empty:
+        return df
+
+    # `_build_core` preserves each surviving row's original positional index
+    # (it only ever subsets by boolean mask, never resets), so `row_index`
+    # still identifies which `created[...]` decision produced that row.
+    for row_index in df.index:
+        decision = created[row_index]
+        df.loc[row_index, "Field Note"] = decision.new_field_note
+        df.loc[row_index, "Identifier?"] = decision.new_identifier
+        df.loc[row_index, "Required Field?"] = decision.new_required_field
+        df.loc[row_index, "Field Annotation"] = decision.new_field_annotation
+        df.loc[row_index, "Matrix Group Name"] = decision.new_matrix_group_name
+        df.loc[row_index, "Matrix Ranking?"] = decision.new_matrix_ranking
+        df.loc[row_index, "Question Number (surveys only)"] = (
+            decision.new_question_number
+        )
+        if decision.new_custom_alignment:
+            df.loc[row_index, "Custom Alignment"] = decision.new_custom_alignment
+
+    return df.reset_index(drop=True)
+
+
+def build_data_dictionary(
+    matched_rows: pd.DataFrame,
+    arc_catalog: pd.DataFrame,
+    decisions: list[MatchDecision],
+) -> pd.DataFrame:
+    """Convert matched, overridden, and newly created questions into a
+    REDCap-style data dictionary.
 
     Parameters
     ----------
@@ -303,6 +505,10 @@ def build_data_dictionary(matched_rows: pd.DataFrame, arc_catalog: pd.DataFrame)
     arc_catalog : the *original*, non-expanded ARC catalog (one row per
         `Variable`), used to look up rows for variables referenced only in
         someone else's branching logic (see `_add_missing_branching_logic_rows`).
+    decisions : every `MatchDecision` made in the session — used to apply
+        per-field ARC-vs-source overrides to `matched_rows` and to build
+        rows for CREATED/MATCHED_CREATED questions (both are otherwise
+        absent from `matched_rows`, which only ever holds ARC catalog rows).
 
     Mirrors `generate.py`'s `_generate_crf` + `_custom_alignment` and the
     descriptive-label wrapping from `on_generate_click`, plus three extra
@@ -310,10 +516,14 @@ def build_data_dictionary(matched_rows: pd.DataFrame, arc_catalog: pd.DataFrame)
     grouped into sequential blocks, and every branching-logic variable
     present as its own row.
     """
-    if matched_rows.empty:
+    matched_rows = _apply_field_overrides(matched_rows, decisions)
+    matched_part = _build_core(matched_rows)
+    created_part = _created_question_rows(decisions)
+
+    df = pd.concat([matched_part, created_part], ignore_index=True)
+    if df.empty:
         return pd.DataFrame(columns=_REDCAP_COLUMNS)
 
-    df = _build_core(matched_rows)
     df = _add_missing_branching_logic_rows(df, arc_catalog)
     df = _drop_duplicate_fieldnames(df)
     df = _make_forms_sequential(df)
