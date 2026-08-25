@@ -168,7 +168,7 @@ def _on_candidate_change(idx: int, candidate_key: str, candidate):
 
 
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
-                   arc_catalog_df: pd.DataFrame):
+                   arc_catalog_df: pd.DataFrame, scope_filters: dict):
     st.session_state.source_questions = source_qs
     st.session_state.decisions = [MatchDecision(source=q) for q in source_qs]
     st.session_state.matcher = matcher
@@ -176,6 +176,7 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     st.session_state.flow_started = True
     
     st.session_state.reference_df = reference_df
+    st.session_state.scope_filters = scope_filters
   
     st.session_state.arc_catalog_df = arc_catalog_df
 
@@ -190,7 +191,10 @@ def _reset_session():
         "mixed_match_default",
         "reference_df",
         "arc_catalog_df",
+        "scope_filters",
         "arc_filter_columns",
+        "arc_scope_values_Form",
+        "arc_scope_values_Section",
         "allowed_row_indices",
     ):
         st.session_state.pop(key, None)
@@ -364,25 +368,48 @@ def _render_translation_form():
     return use_translation, api_key, source_lang
 
 
-def _render_candidate_filter(reference_df: pd.DataFrame) -> dict:
-    """Sidebar UI: pick ARC columns, then values within each, to restrict
-    which reference rows are eligible to be suggested as match candidates.
+def _render_search_scope(reference_df: pd.DataFrame) -> dict:
+    """Sidebar UI for the Form and Section search scope selected at startup."""
+    st.sidebar.header("3. Search scope (optional)")
+    st.sidebar.caption("Choose ARC forms or sections before matching starts.")
 
-    Returns a dict of {column: [selected values]} for every column with at
-    least one value chosen. An empty dict means "no filter active".
-    """
-    st.sidebar.header("3. Filter candidates (optional)")
+    filters = {}
+    for col in ("Form", "Section"):
+        if col not in reference_df.columns:
+            continue
+        options = sorted(v for v in reference_df[col].astype(str).unique() if v.strip())
+        chosen = st.sidebar.multiselect(
+            f"{col}", options, key=f"arc_scope_values_{col}"
+        )
+        if chosen:
+            filters[col] = chosen
+
+    if filters and st.sidebar.button("Clear filters"):
+        for col in ("Form", "Section"):
+            st.session_state.pop(f"arc_scope_values_{col}", None)
+        st.rerun()
+
+    return filters
+
+
+def _render_candidate_filter(reference_df: pd.DataFrame,
+                             scope_filters: dict | None = None) -> dict:
+    """Sidebar UI for narrowing candidates while matching is in progress."""
+    st.sidebar.header("4. Filter candidates (optional)")
     st.sidebar.caption("Restrict which ARC rows can be suggested as matches.")
 
-    columns = list(reference_df.columns)
+    available_df = reference_df
+    for col, values in (scope_filters or {}).items():
+        available_df = available_df[available_df[col].astype(str).isin(values)]
+
     selected_columns = st.sidebar.multiselect(
-        "Filter by column(s)", columns, key="arc_filter_columns"
+        "Filter by column(s)", list(available_df.columns), key="arc_filter_columns"
     )
 
     filters = {}
     for col in selected_columns:
         options = sorted(
-            v for v in reference_df[col].dropna().astype(str).unique() if v.strip()
+            v for v in available_df[col].dropna().astype(str).unique() if v.strip()
         )
         chosen = st.sidebar.multiselect(
             f"'{col}' values", options, key=f"arc_filter_values_{col}"
@@ -390,7 +417,7 @@ def _render_candidate_filter(reference_df: pd.DataFrame) -> dict:
         if chosen:
             filters[col] = chosen
 
-    if selected_columns and st.sidebar.button("Clear filters"):
+    if selected_columns and st.sidebar.button("Clear candidate filters"):
         for col in selected_columns:
             st.session_state.pop(f"arc_filter_values_{col}", None)
         st.session_state.pop("arc_filter_columns", None)
@@ -1196,6 +1223,19 @@ def main():
             with col_b:
                 results_r = _render_mapping(reference_df, "ARC", is_source=False)
 
+            scope_filters = _render_search_scope(reference_df)
+            allowed_row_indices = _allowed_row_indices(df_expanded, scope_filters)
+            filter_clauses = [
+                {col: {"$in": values}} for col, values in scope_filters.items()
+            ]
+            metadata_filters = (
+                filter_clauses[0]
+                if len(filter_clauses) == 1
+                else {"$and": filter_clauses}
+                if filter_clauses
+                else None
+            )
+
             if st.button(
                 "Start comparison", type="primary", disabled=not results_s["question"]
             ):
@@ -1227,9 +1267,11 @@ def main():
                     bm25_retriever=bm25_retriever,
                     stemmer=stemmer,
                     arc_pd=reference_df,
+                    allowed_row_indices=allowed_row_indices,
+                    metadata_filters=metadata_filters,
                 )
 
-                _init_session(source_qs, matcher, df_expanded, reference_df)
+                _init_session(source_qs, matcher, df_expanded, reference_df, scope_filters)
                 st.rerun()
         else:
             st.info(
@@ -1239,9 +1281,11 @@ def main():
 
     _render_progress()
 
-    filters = _render_candidate_filter(st.session_state.reference_df)
+    filters = _render_candidate_filter(
+        st.session_state.reference_df, st.session_state.get("scope_filters")
+    )
     st.session_state.allowed_row_indices = _allowed_row_indices(
-        st.session_state.reference_df, filters
+        st.session_state.arc_catalog_df, filters
     )
 
     _render_question_flow()

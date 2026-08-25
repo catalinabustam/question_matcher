@@ -8,7 +8,7 @@ index (`create_bm25_retriever`) is only ever done once, from the standalone
 (`retrieve_functions.hybrid_retrieve`). The Streamlit app just loads the
 already-built index at startup via `load_bm25_retriever`.
 """
-from typing import List, Tuple
+from typing import List, Optional, Set, Tuple
 
 import bm25s
 import Stemmer
@@ -57,9 +57,18 @@ def load_bm25_retriever(index_path: str = BM25_INDEX_PATH) -> Tuple[bm25s.BM25, 
 
 
 def bm25s_retrieve(query: str, retriever, doc_ids: List[str], stemmer,
-                    top_k: int = 10) -> List[Tuple[str, float]]:
-    """Retrieve top-k `(doc_id, score)` pairs using BM25 sparse search."""
+                    top_k: int = 10,
+                    allowed_doc_ids: Optional[Set[str]] = None) -> List[Tuple[str, float]]:
+    """Retrieve top-k BM25 pairs, optionally keeping only allowed document IDs."""
+    if not doc_ids:
+        return []
     query_tokens = bm25s.tokenize(query, stemmer=stemmer, stopwords="en")
-    k = max(1, min(top_k, len(doc_ids)))
+    # Search the complete sparse index, then apply the catalog filter before fusion.
+    k = len(doc_ids)
     lexical_indices, scores = retriever.retrieve(query_tokens, k=k)
-    return [(doc_ids[idx], float(score)) for idx, score in zip(lexical_indices[0], scores[0])]
+    results = [
+        (doc_ids[idx], float(score))
+        for idx, score in zip(lexical_indices[0], scores[0])
+        if allowed_doc_ids is None or doc_ids[idx] in allowed_doc_ids
+    ]
+    return results[:top_k]
