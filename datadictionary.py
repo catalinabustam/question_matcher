@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from models import MatchDecision, MatchStatus
+from translations import apply_translation
 
 _DESCRIPTIVE_LABEL_TEMPLATE = (
     '<div class="rich-text-field-label"><h5 style="text-align: center;">'
@@ -627,10 +628,36 @@ def _created_question_rows(decisions: list[MatchDecision]) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _translation_override_skip_sets(
+    decisions: list[MatchDecision],
+) -> tuple[set[str], set[str]]:
+    """Matched ARC variables whose Field Label / Choices a mixed-match
+    decision explicitly kept from the *source* CSV.
+
+    ARC-Translations only ever carries ARC's own wording, so those
+    variables must be excluded from `apply_translation` — otherwise
+    translating the export would silently overwrite the user's "use
+    source" choice with ARC's (translated) text.
+    """
+    skip_label = set()
+    skip_choices = set()
+    for decision in decisions:
+        matched = decision.matched_questions
+        if len(matched) != 1:
+            continue
+        variable = matched[0].variable
+        if decision.field_overrides.get("question") == "source":
+            skip_label.add(variable)
+        if decision.field_overrides.get("options") == "source":
+            skip_choices.add(variable)
+    return skip_label, skip_choices
+
+
 def build_data_dictionary(
     matched_rows: pd.DataFrame,
     arc_catalog: pd.DataFrame,
     decisions: list[MatchDecision],
+    translation: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Convert matched, overridden, and newly created questions into a
     REDCap-style data dictionary.
@@ -649,6 +676,11 @@ def build_data_dictionary(
         from `matched_rows`, which only ever holds ARC catalog rows), and to
         rename any leftover references to a renamed variable (see
         `build_variable_rename_map`).
+    translation : an ARC-Translations `ARCH.csv` (see `translations.py`)
+        for the desired output language, or `None` to keep everything in
+        its original language. When given, every matched row's Field Label
+        / Choices are swapped for ARC's translated wording — newly created
+        questions have no ARC `Variable` to look up and are left as-is.
 
     Mirrors `generate.py`'s `_generate_crf` + `_custom_alignment` and the
     descriptive-label wrapping from `on_generate_click`, plus four extra
@@ -674,5 +706,9 @@ def build_data_dictionary(
 
     rename_map = build_variable_rename_map(decisions)
     df = _apply_variable_renames(df, rename_map)
+
+    if translation is not None:
+        skip_label, skip_choices = _translation_override_skip_sets(decisions)
+        df = apply_translation(df, translation, skip_label, skip_choices)
 
     return df.fillna("")
