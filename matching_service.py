@@ -43,6 +43,7 @@ class QuestionMatchingService:
         self._ids = ids
         self._bm25 = bm25_retriever
         self._stemmer = stemmer
+        self._arc_pd = arc_pd
         self._id_to_index = {doc_id: i for i, doc_id in enumerate(ids)}
 
     def find_candidates(self, source: Question, top_n: int = 5,
