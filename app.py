@@ -25,7 +25,8 @@ from matching_service import QuestionMatchingService
 from models import MatchDecision, MatchStatus
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
-from translate import DeepLTranslator, OllamaTranslator, translate_questions
+from translate import DeepLTranslator, translate_questions
+from translations import available_languages, load_translation
 from dotenv import load_dotenv
 from vector_db import (
     EMBEDDING_MODEL,
@@ -37,6 +38,7 @@ from vector_db import (
 
 AUTO_DETECT = "Auto-detect"
 DEEPL_LANGUAGES = ["ES", "EN-US", "EN-GB", "PT-BR", "PT-PT", "FR", "DE", "IT", "CA"]
+ENGLISH_OPTION = "English (original)"
 
 st.set_page_config(page_title="Question Matcher", layout="wide")
 
@@ -76,6 +78,15 @@ def _load_index():
 
     return (reference_df, df_expanded, collection_questions, collection_ques_def,
             documents, ids, bm25_retriever, stemmer)
+
+
+@st.cache_data(show_spinner=False)
+def _load_translation_cached(language: str) -> pd.DataFrame:
+    """Cached wrapper around `translations.load_translation` — the CSV
+    itself never changes within a run, so re-reading it from disk on every
+    export-section rerun would be wasted work.
+    """
+    return load_translation(language)
 
 
 def _read_csv(uploaded_file, separator: str) -> pd.DataFrame:
@@ -351,52 +362,21 @@ def _render_sidebar_upload():
 
 
 def _render_translation_form():
-    st.sidebar.header("2. Translation")
+    st.sidebar.header("2. Translation (DeepL)")
     use_translation = st.sidebar.checkbox(
         "Translate source CSV questions before comparing", value=False
     )
 
-    translator_type = "DeepL"
-    api_key = ""
-    ollama_model = None
-    ollama_base_url = "http://localhost:11434"
     source_lang = None
-
+    api_key = ""
     if use_translation:
-        translator_type = st.sidebar.selectbox(
-            "Translation provider", ["DeepL", "Ollama"], index=0
+        api_key = os.getenv("DEEPL_API_KEY", "")
+        source_choice = st.sidebar.selectbox(
+            "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
         )
+        source_lang = None if source_choice == AUTO_DETECT else source_choice
 
-        if translator_type == "DeepL":
-            api_key = os.getenv("DEEPL_API_KEY", "")
-            source_choice = st.sidebar.selectbox(
-                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
-            )
-            source_lang = None if source_choice == AUTO_DETECT else source_choice
-        else:  # Ollama
-            ollama_base_url = st.sidebar.text_input(
-                "Ollama base URL", value="http://localhost:11434"
-            )
-            # Fetch available models
-            try:
-                available_models = OllamaTranslator.get_available_models(ollama_base_url)
-            except Exception:
-                available_models = []
-
-            if available_models:
-                ollama_model = st.sidebar.selectbox(
-                    "Ollama model", available_models, index=0
-                )
-            else:
-                st.sidebar.warning("No Ollama models found. Make sure Ollama is running.")
-                ollama_model = st.sidebar.text_input("Model name (manual)", value="llama3.2")
-
-            source_choice = st.sidebar.selectbox(
-                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
-            )
-            source_lang = None if source_choice == AUTO_DETECT else source_choice
-
-    return use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang
+    return use_translation, api_key, source_lang
 
 
 def _render_search_scope(reference_df: pd.DataFrame) -> dict:
@@ -1199,8 +1179,27 @@ def _render_export():
         "Includes matched questions (with any per-field ARC/source overrides applied) "
         "and newly created questions — ignored questions are excluded."
     )
+
+    language_options = [ENGLISH_OPTION] + available_languages()
+    selected_language = st.selectbox(
+        "Output language",
+        language_options,
+        key="output_language",
+        help="Translate matched ARC questions/choices into another language "
+        "(via ARC-Translations) before export. Newly created questions have "
+        "no ARC variable to translate and stay in their original language.",
+    )
+    translation = (
+        _load_translation_cached(selected_language)
+        if selected_language != ENGLISH_OPTION
+        else None
+    )
+
     data_dictionary_df = build_data_dictionary(
-        _matched_arc_rows(), st.session_state.arc_catalog_df, st.session_state.decisions
+        _matched_arc_rows(),
+        st.session_state.arc_catalog_df,
+        st.session_state.decisions,
+        translation=translation,
     )
     dictionary_bytes = data_dictionary_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
@@ -1221,7 +1220,7 @@ def main():
     st.title("Question Matcher against a Reference Catalog")
 
     separator, source_file = _render_sidebar_upload()
-    use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang = _render_translation_form()
+    use_translation, api_key, source_lang = _render_translation_form()
 
     if st.sidebar.button("Reset"):
         _reset_session()
@@ -1280,23 +1279,13 @@ def main():
 
                 if use_translation:
                     try:
-                        if translator_type == "DeepL":
-                            translator = DeepLTranslator(api_key)
-                            with st.spinner("Translating questions with DeepL..."):
-                                source_qs = translate_questions(
-                                    translator, questions=source_qs, source_lang=source_lang
-                                )
-                        else:  # Ollama
-                            if not ollama_model:
-                                st.error("Please select an Ollama model.")
-                                return
-                            translator = OllamaTranslator(ollama_model, ollama_base_url)
-                            with st.spinner(f"Translating questions with Ollama ({ollama_model})..."):
-                                source_qs = translate_questions(
-                                    translator, questions=source_qs, source_lang=source_lang
-                                )
+                        translator = DeepLTranslator(api_key)
+                        with st.spinner("Translating questions with DeepL..."):
+                            source_qs = translate_questions(
+                                translator, questions=source_qs, source_lang=source_lang
+                            )
                     except Exception as exc:
-                        st.error(f"Error translating: {exc}")
+                        st.error(f"Error translating with DeepL: {exc}")
                         return
 
                 matcher = QuestionMatchingService(
