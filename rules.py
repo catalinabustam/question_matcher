@@ -73,23 +73,35 @@ def _domain_code(section: str | None) -> str:
 
 def _topic_code(question: str) -> list[str]:
     # Clean non-alphanumeric characters
-    cleaned_text = re.sub(r"[^a-zA-Z\s]", "", question.lower())
+    cleaned_text = re.sub(r"[^a-zA-Z\s]", "", question.lower().strip())
+
+    # Fallback if text is empty after cleaning
+    if not cleaned_text:
+        return "question"
 
     # Initialize TF-IDF Vectorizer with English stop words removal
     vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
 
-    # Fit and transform the text
-    tfidf_matrix = vectorizer.fit_transform([cleaned_text])
+    try:
+        tfidf_matrix = vectorizer.fit_transform([cleaned_text])
+    except ValueError:
+        # Handles edge cases where text only contained stop words (e.g., "what is it")
+        return "question"
+
     feature_names = vectorizer.get_feature_names_out()
     scores = tfidf_matrix.toarray()[0]
 
     # Rank words by highest TF-IDF score
     word_score_pairs = list(zip(feature_names, scores))
-    sorted_pairs = sorted(word_score_pairs, key=lambda x: x[1], reverse=True)
+    sorted_pairs = sorted(
+        word_score_pairs,
+        key=lambda x: (x[1], len(x[0].split()), len(x[0])),
+        reverse=True,
+    )
 
-    second_topic, score = sorted_pairs[1]
+    best_topic = sorted_pairs[0][0] if sorted_pairs else "general"
 
-    return second_topic.replace(" ", "")[:_TOPIC_MAX_LEN]
+    return best_topic.replace(" ", "")[:_TOPIC_MAX_LEN]
 
 
 def build_variable_name(
