@@ -12,10 +12,24 @@ only happen ONCE per app run — that's done in `app.py`
 class just receives the already-built resources and turns a `Question` into
 a ranked list of `MatchCandidate`.
 """
+import re
 from typing import Dict, List, Optional, Set
 
 from models import MatchCandidate, Question
 from retrieve_functions import hybrid_retrieve
+
+_OPTION_NOISE_RE = re.compile(r"\d+|[^\w\s]|\b(?:yes|no|unknown)\b", re.IGNORECASE)
+
+
+def _clean_options_text(options: Optional[str]) -> str:
+    """Clean a (possibly pipe-separated) options string for query use."""
+    if not options:
+        return ""
+    cleaned_parts = [
+        re.sub(r"\s+", " ", _OPTION_NOISE_RE.sub(" ", part)).strip()
+        for part in options.split("|")
+    ]
+    return ", ".join(part for part in cleaned_parts if part)
 
 
 class QuestionMatchingService:
@@ -64,6 +78,9 @@ class QuestionMatchingService:
         2. `source.translated_question` / `source.translated_definition`.
         3. `source.question` / `source.definition`, if no translation was made.
 
+        The source question's answer options (translated, if available) are
+        also appended to the query, 
+
         Parameters
         ----------
         top_n : how many ranked candidates to return. The UI can call this
@@ -82,8 +99,11 @@ class QuestionMatchingService:
         query_question = override_question or source.translated_question or source.question
         query_definition = (override_definition or source.translated_definition
                              or source.definition or "")
+        query_options = _clean_options_text(source.translated_options or source.options)
 
         query = f"{query_question}. {query_definition}".strip()
+        if query_options:
+            query = f"{query}. {query_options}".strip()
 
         if not self._reference:
             return []

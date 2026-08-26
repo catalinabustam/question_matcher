@@ -31,6 +31,7 @@ class Question:
     translated_section: str | None = None
     translated_question: str | None = None
     translated_definition: str | None = None
+    translated_options: str | None = None
     topic: str | None = None
     # Optional REDCap Data Dictionary fields
     form_name: str | None = None

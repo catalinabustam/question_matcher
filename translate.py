@@ -163,6 +163,7 @@ def translate_questions(translator: Translator, questions: List[Question],
     translated_sections = translator.translate_many([q.section for q in questions], source_lang=source_lang)
     translated_questions = translator.translate_many([q.question for q in questions], source_lang=source_lang)
     translated_definitions = translator.translate_many([q.definition for q in questions], source_lang=source_lang)
+    translated_options = translator.translate_many([q.options for q in questions], source_lang=source_lang)
 
     return [
         replace(
@@ -170,8 +171,9 @@ def translate_questions(translator: Translator, questions: List[Question],
             translated_section=translated_section,
             translated_question=translated_question,
             translated_definition=translated_definition,
+            translated_options=translated_option,
         )
-        for q, translated_section, translated_question, translated_definition in zip(
-            questions, translated_sections, translated_questions, translated_definitions
+        for q, translated_section, translated_question, translated_definition, translated_option in zip(
+            questions, translated_sections, translated_questions, translated_definitions, translated_options
         )
     ]
