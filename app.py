@@ -48,7 +48,7 @@ IGNORE_LABEL = "🚫 Ignore this question (do not include in export)"
 
 # Pagination over the candidate list: show this many at first, grow by this
 # many per "Load more" click, up to this hard cap.
-CANDIDATES_MAX = 50
+CANDIDATES_MAX = 100
 
 load_dotenv(override=True)
 
@@ -233,6 +233,7 @@ def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
     new_text: str, create_new: bool = False, ignore: bool = False,
     new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
+    new_variable_name_source: str = "",
     new_options: str = "", new_field_note: str = "", new_validation_type: str = "",
     new_validation_min: str = "", new_validation_max: str = "",
     new_identifier: str = "", new_branching_logic: str = "",
@@ -266,6 +267,7 @@ def _save_decision(
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
         decision.new_id = new_field_name or preview["new_id"]
+        decision.new_variable_name_source = new_variable_name_source
         decision.new_form_name = new_form_name or preview["new_form_name"]
         decision.new_section = new_section or preview["new_section"]
         decision.new_field_type = new_field_type or preview["new_field_type"]
@@ -309,6 +311,7 @@ def _save_decision(
         decision.matched = None
         decision.matches = []
         decision.new_id = decision.new_section = decision.new_text = ""
+        decision.new_variable_name_source = ""
         decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = (
             decision.new_validation_min
@@ -331,6 +334,7 @@ def _save_decision(
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
         decision.new_id = decision.new_section = decision.new_text = ""
+        decision.new_variable_name_source = ""
         decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = (
             decision.new_validation_min
@@ -693,6 +697,11 @@ def _render_question_flow():
         f"✅ {len(selected_match_labels)} of {num_candidates} candidate(s) selected for matching."
     )
 
+    if create_new_key not in st.session_state:
+        st.session_state[create_new_key] = decision.status in (
+            MatchStatus.CREATED,
+            MatchStatus.MATCHED_CREATED,
+        )
     create_new = st.checkbox(
         CREATE_NEW_LABEL,
         key=create_new_key,
@@ -708,6 +717,7 @@ def _render_question_flow():
     new_identifier = new_branching_logic = new_required_field = ""
     new_custom_alignment = new_field_annotation = ""
     new_matrix_group_name = new_matrix_ranking = new_question_number = ""
+    variable_name_source = ""
     variable_name_conflict = False
     create_new_errors: list[str] = []
 
@@ -734,6 +744,14 @@ def _render_question_flow():
         ):
             available_forms = [source.form_name] + available_forms
 
+        # Also include any custom form name from the saved decision
+        if (
+            decision.new_form_name
+            and decision.new_form_name.lower() not in available_forms_lower
+        ):
+            available_forms = [decision.new_form_name] + available_forms
+            available_forms_lower = [form.lower() for form in available_forms]
+
         default_selected_form = decision.new_form_name or source.form_name or None
 
         available_sections = sorted(
@@ -755,6 +773,15 @@ def _render_question_flow():
             and source.section.lower() not in available_sections_lower
         ):
             available_sections = [source.section] + available_sections
+            available_sections_lower = [section.lower() for section in available_sections]
+
+        # Also include any custom section name from the saved decision
+        if (
+            decision.new_section
+            and decision.new_section.lower() not in available_sections_lower
+        ):
+            available_sections = [decision.new_section] + available_sections
+            available_sections_lower = [section.lower() for section in available_sections]
 
         default_selected_section = decision.new_section or source.section or None
 
@@ -814,6 +841,11 @@ def _render_question_flow():
         with col2:
             variable_name_source_key = f"vid_src_{idx}"
             if source.variable:
+                if variable_name_source_key not in st.session_state:
+                    st.session_state[variable_name_source_key] = (
+                        decision.new_variable_name_source
+                        or "Use source variable name"
+                    )
                 variable_name_source = st.radio(
                     "Variable name source",
                     ["Use source variable name", "Auto-generate (ARC convention)"],
@@ -841,7 +873,10 @@ def _render_question_flow():
             field_name_key = f"vid_{idx}"
             field_name_context_key = f"vid_context_{idx}"
             context = (new_section, variable_name_source)
-            if field_name_context_key not in st.session_state:
+            if (
+                field_name_key not in st.session_state
+                or field_name_context_key not in st.session_state
+            ):
                 st.session_state[field_name_key] = decision.new_id or suggested_id
                 st.session_state[field_name_context_key] = context
             elif st.session_state[field_name_context_key] != context:
@@ -1166,23 +1201,40 @@ def _render_question_flow():
             "Select one or more candidates, enter a section for the new question, or ignore this row."
         )
 
+    def save_current_decision() -> None:
+        if can_save:
+            _save_decision(
+                idx, selected_match_labels, candidates, new_section, new_text,
+                create_new=create_new, ignore=ignore, new_field_name=new_field_name,
+                new_variable_name_source=variable_name_source,
+                new_form_name=new_form_name, new_field_type=new_field_type,
+                new_options=new_options, new_field_note=new_field_note,
+                new_validation_type=new_validation_type,
+                new_validation_min=new_validation_min,
+                new_validation_max=new_validation_max,
+                new_identifier=new_identifier,
+                new_branching_logic=new_branching_logic,
+                new_required_field=new_required_field,
+                new_custom_alignment=new_custom_alignment,
+                new_field_annotation=new_field_annotation,
+                new_matrix_group_name=new_matrix_group_name,
+                new_matrix_ranking=new_matrix_ranking,
+                new_question_number=new_question_number,
+                field_overrides=field_overrides,
+            )
+
     nav_cols = st.columns([1, 1, 1, 5])
     if nav_cols[0].button("⬅ Previous", disabled=idx == 0):
+        save_current_decision()
         st.session_state.current_idx = max(0, idx - 1)
         st.rerun()
     if nav_cols[1].button("Save and continue ➡", type="primary", disabled=not can_save):
-        _save_decision(
-            idx, selected_match_labels, candidates, new_section, new_text, create_new=create_new, ignore=ignore, new_field_name=new_field_name, 
-            new_form_name=new_form_name, new_field_type=new_field_type, new_options=new_options, new_field_note=new_field_note,
-            new_validation_type=new_validation_type, new_validation_min=new_validation_min, new_validation_max=new_validation_max, new_identifier=new_identifier, 
-            new_branching_logic=new_branching_logic, new_required_field=new_required_field, new_custom_alignment=new_custom_alignment,
-            new_field_annotation=new_field_annotation, new_matrix_group_name=new_matrix_group_name, new_matrix_ranking=new_matrix_ranking, 
-            new_question_number=new_question_number, field_overrides=field_overrides,
-        )
+        save_current_decision()
         if idx < total - 1:
             st.session_state.current_idx = idx + 1
         st.rerun()
     if nav_cols[2].button("Next ➡", disabled=idx == total - 1):
+        save_current_decision()
         st.session_state.current_idx = min(total - 1, idx + 1)
         st.rerun()
 
