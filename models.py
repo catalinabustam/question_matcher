@@ -68,6 +68,7 @@ class MatchDecision:
     new_section: str = ""
     new_text: str = ""
     new_id: str = ""
+    new_variable_name_source: str = ""
     # Data dictionary fields for newly created questions
     new_form_name: str = ""
     new_field_type: str = ""
