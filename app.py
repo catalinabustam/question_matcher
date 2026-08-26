@@ -107,9 +107,20 @@ def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = Fa
     return None if choice == NONE_OPTION else choice
 
 
-def _candidate_label(candidate) -> str:
+def _candidate_label(candidate, exact_match: bool = False) -> str:
+    badge = "  ·  🟢 Same ARC variable name" if exact_match else ""
     return (f"{candidate.question.question}  ·  section: {candidate.question.section or '—'}"
-            f"  ·  score: {candidate.score:.0%}")
+            f"  ·  score: {candidate.score:.0%}{badge}")
+
+
+def _is_exact_variable_match(candidate, source) -> bool:
+    """Whether `candidate` has the exact same variable name as `source`.
+
+    A strong signal the two represent the same field — much stronger than
+    the text-similarity score — so it's used to pin the candidate first in
+    the list and pre-select it (see `_render_question_flow`).
+    """
+    return bool(source.variable) and candidate.question.variable == source.variable
 
 
 def _existing_match_question_number(candidate, exclude_idx: int) -> int | None:
@@ -234,6 +245,7 @@ def _save_decision(
     new_text: str, create_new: bool = False, ignore: bool = False,
     new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
     new_variable_name_source: str = "",
+    new_text_source: str = "",
     new_options: str = "", new_field_note: str = "", new_validation_type: str = "",
     new_validation_min: str = "", new_validation_max: str = "",
     new_identifier: str = "", new_branching_logic: str = "",
@@ -245,7 +257,12 @@ def _save_decision(
     decision = st.session_state.decisions[idx]
     if create_new:
         matched_questions = [
-            c.question for c in candidates if _candidate_label(c) in selected_labels
+            c.question
+            for c in candidates
+            if _candidate_label(
+                c, exact_match=_is_exact_variable_match(c, decision.source)
+            )
+            in selected_labels
         ]
         sequence = (
             sum(
@@ -272,6 +289,7 @@ def _save_decision(
         decision.new_section = new_section or preview["new_section"]
         decision.new_field_type = new_field_type or preview["new_field_type"]
         decision.new_text = new_text or preview["new_text"]
+        decision.new_text_source = new_text_source
         decision.new_options = new_options or preview["new_options"]
         decision.new_field_note = new_field_note or preview["new_field_note"]
         decision.new_validation_type = new_validation_type or preview.get(
@@ -312,6 +330,7 @@ def _save_decision(
         decision.matches = []
         decision.new_id = decision.new_section = decision.new_text = ""
         decision.new_variable_name_source = ""
+        decision.new_text_source = ""
         decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = (
             decision.new_validation_min
@@ -328,13 +347,19 @@ def _save_decision(
         decision.field_overrides = {}
     else:
         matched_questions = [
-            c.question for c in candidates if _candidate_label(c) in selected_labels
+            c.question
+            for c in candidates
+            if _candidate_label(
+                c, exact_match=_is_exact_variable_match(c, decision.source)
+            )
+            in selected_labels
         ]
         decision.status = MatchStatus.MATCHED
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
         decision.new_id = decision.new_section = decision.new_text = ""
         decision.new_variable_name_source = ""
+        decision.new_text_source = ""
         decision.new_form_name = decision.new_field_type = decision.new_options = ""
         decision.new_field_note = decision.new_validation_type = (
             decision.new_validation_min
@@ -620,8 +645,22 @@ def _render_question_flow():
         allowed_row_indices=st.session_state.get("allowed_row_indices"),
     )
 
+    # If one of the candidates has the exact same variable name as the
+    # source question, surface it first — it's almost certainly the right
+    # match, and matching by identical ARC-style ID is a much stronger
+    # signal than the text-similarity score.
+    exact_match_pos = next(
+        (i for i, c in enumerate(candidates) if _is_exact_variable_match(c, source)),
+        None,
+    )
+    if exact_match_pos is not None and exact_match_pos != 0:
+        candidates.insert(0, candidates.pop(exact_match_pos))
+
     num_candidates = len(candidates)
-    visible_labels = [_candidate_label(c) for c in candidates]
+    visible_labels = [
+        _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
+        for c in candidates
+    ]
 
     if not candidates:
         st.warning(
@@ -637,7 +676,7 @@ def _render_question_flow():
     default_selected = set()
     if decision.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
         default_selected = {
-            _candidate_label(c)
+            _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
             for c in candidates
             if any(
                 matched.row_index == c.question.row_index
@@ -669,7 +708,9 @@ def _render_question_flow():
     selected_match_labels = []
     with st.container(height=300):
         for i, candidate in enumerate(candidates):
-            label = _candidate_label(candidate)
+            label = _candidate_label(
+                candidate, exact_match=_is_exact_variable_match(candidate, source)
+            )
             key = f"candidate_{idx}_{i}"
 
             if key not in st.session_state:
@@ -718,6 +759,7 @@ def _render_question_flow():
     new_custom_alignment = new_field_annotation = ""
     new_matrix_group_name = new_matrix_ranking = new_question_number = ""
     variable_name_source = ""
+    new_text_source = ""
     variable_name_conflict = False
     create_new_errors: list[str] = []
 
@@ -821,9 +863,10 @@ def _render_question_flow():
                 help="Select the form this question belongs to",
             )
         with col2:
+            preferred_field_type = decision.new_field_type or preview["new_field_type"]
             default_field_type = (
-                decision.new_field_type
-                if decision.new_field_type in field_type_options
+                preferred_field_type
+                if preferred_field_type in field_type_options
                 else ("text" if "text" in field_type_options else field_type_options[0])
             )
             new_field_type = st.selectbox(
@@ -898,10 +941,51 @@ def _render_question_flow():
                 )
 
         # Row 3: Field Label (Question text)
+        has_translation = bool(
+            source.translated_question
+            and source.translated_question != source.question
+        )
+        if has_translation:
+            label_source_key = f"label_src_{idx}"
+            if label_source_key not in st.session_state:
+                st.session_state[label_source_key] = (
+                    "Use original question"
+                    if decision.new_text_source == "original"
+                    else "Use translated question"
+                )
+            label_source_choice = st.radio(
+                "Field Label source",
+                ["Use translated question", "Use original question"],
+                key=label_source_key,
+                horizontal=True,
+                help="Choose whether the Field Label below starts from the "
+                "translated question text or the original source text. "
+                "Either way, you can still edit it freely.",
+            )
+        else:
+            label_source_choice = "Use original question"
+        new_text_source = (
+            "translated" if label_source_choice == "Use translated question" else "original"
+        )
+
+        suggested_text = (
+            source.translated_question
+            if new_text_source == "translated" and source.translated_question
+            else source.question
+        )
+
+        text_key = f"text_{idx}"
+        text_context_key = f"text_context_{idx}"
+        if text_key not in st.session_state or text_context_key not in st.session_state:
+            st.session_state[text_key] = decision.new_text or suggested_text
+            st.session_state[text_context_key] = new_text_source
+        elif st.session_state[text_context_key] != new_text_source:
+            st.session_state[text_key] = suggested_text
+            st.session_state[text_context_key] = new_text_source
+
         new_text = st.text_area(
             "Field Label *",
-            value=decision.new_text or preview["new_text"],
-            key=f"text_{idx}",
+            key=text_key,
             height=80,
             help="The question text shown to users",
         )
@@ -1055,7 +1139,14 @@ def _render_question_flow():
     matched_variable_conflicts: list[str] = []
     if not create_new and not ignore and selected_match_labels:
         for label in selected_match_labels:
-            candidate = next(c for c in candidates if _candidate_label(c) == label)
+            candidate = next(
+                c
+                for c in candidates
+                if _candidate_label(
+                    c, exact_match=_is_exact_variable_match(c, source)
+                )
+                == label
+            )
             existing_q_num = _existing_match_question_number(candidate, idx)
             if existing_q_num is not None:
                 matched_variable_conflicts.append(
@@ -1066,7 +1157,8 @@ def _render_question_flow():
         matched_for_mix = next(
             c.question
             for c in candidates
-            if _candidate_label(c) == selected_match_labels[0]
+            if _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
+            == selected_match_labels[0]
         )
         with st.container(border=True):
             st.markdown("**🔀 Mixed match — choose ARC vs. source per field**")
@@ -1207,6 +1299,7 @@ def _render_question_flow():
                 idx, selected_match_labels, candidates, new_section, new_text,
                 create_new=create_new, ignore=ignore, new_field_name=new_field_name,
                 new_variable_name_source=variable_name_source,
+                new_text_source=new_text_source,
                 new_form_name=new_form_name, new_field_type=new_field_type,
                 new_options=new_options, new_field_note=new_field_note,
                 new_validation_type=new_validation_type,
