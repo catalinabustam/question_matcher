@@ -69,6 +69,10 @@ class MatchDecision:
     new_text: str = ""
     new_id: str = ""
     new_variable_name_source: str = ""
+    # "translated" or "original" — which source text the Field Label below
+    # was seeded from. Only meaningful when status is CREATED /
+    # MATCHED_CREATED and a translation is available.
+    new_text_source: str = ""
     # Data dictionary fields for newly created questions
     new_form_name: str = ""
     new_field_type: str = ""
