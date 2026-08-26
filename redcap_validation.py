@@ -85,7 +85,7 @@ def validate_record(
             errors.append(f"Variable/Field Name '{variable}' is already in use.")
 
     if not (fields.get("form_name") or "").strip():
-        errors.append("Form Name is required.")
+        warnings.append("Form Name is required.")
     if not (fields.get("label") or "").strip():
         errors.append("Field Label is required.")
 
@@ -94,7 +94,7 @@ def validate_record(
     if not field_type:
         errors.append("Field Type is required.")
     elif field_type not in available:
-        errors.append(f"'{field_type}' is not a valid Field Type.")
+        warnings.append(f"'{field_type}' is not a valid Field Type.")
 
     choices = (fields.get("choices") or "").strip()
     if field_type in _CHOICE_FIELD_TYPES:

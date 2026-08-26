@@ -26,6 +26,7 @@ from models import MatchDecision, MatchStatus
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
 from translate import DeepLTranslator, OllamaTranslator, translate_questions
+from translations import available_languages, load_translation
 from dotenv import load_dotenv
 from vector_db import (
     EMBEDDING_MODEL,
@@ -37,6 +38,7 @@ from vector_db import (
 
 AUTO_DETECT = "Auto-detect"
 DEEPL_LANGUAGES = ["ES", "EN-US", "EN-GB", "PT-BR", "PT-PT", "FR", "DE", "IT", "CA"]
+ENGLISH_OPTION = "English (original)"
 
 st.set_page_config(page_title="Question Matcher", layout="wide")
 
@@ -76,6 +78,15 @@ def _load_index():
 
     return (reference_df, df_expanded, collection_questions, collection_ques_def,
             documents, ids, bm25_retriever, stemmer)
+
+
+@st.cache_data(show_spinner=False)
+def _load_translation_cached(language: str) -> pd.DataFrame:
+    """Cached wrapper around `translations.load_translation` — the CSV
+    itself never changes within a run, so re-reading it from disk on every
+    export-section rerun would be wasted work.
+    """
+    return load_translation(language)
 
 
 def _read_csv(uploaded_file, separator: str) -> pd.DataFrame:
@@ -1004,6 +1015,18 @@ def _render_question_flow():
 
     mixed_match_errors: list[str] = []
     field_overrides: dict[str, str] = dict(decision.field_overrides)
+
+    # Check for variable name conflicts with other decisions for matched questions
+    matched_variable_conflicts: list[str] = []
+    if not create_new and not ignore and selected_match_labels:
+        for label in selected_match_labels:
+            candidate = next(c for c in candidates if _candidate_label(c) == label)
+            existing_q_num = _existing_match_question_number(candidate, idx)
+            if existing_q_num is not None:
+                matched_variable_conflicts.append(
+                    f"Variable '{candidate.question.variable}' is already matched to source question {existing_q_num}"
+                )
+
     if not create_new and not ignore and len(selected_match_labels) == 1:
         matched_for_mix = next(
             c.question
@@ -1125,9 +1148,13 @@ def _render_question_flow():
             for warn in mixed_match_warnings:
                 st.warning(warn)
 
+    for conflict in matched_variable_conflicts:
+        st.error(conflict)
+
     can_save = bool(ignore) or (
         not ignore
         and not mixed_match_errors
+        and not matched_variable_conflicts
         and (
             bool(selected_match_labels)
             if not create_new
@@ -1199,8 +1226,27 @@ def _render_export():
         "Includes matched questions (with any per-field ARC/source overrides applied) "
         "and newly created questions — ignored questions are excluded."
     )
+
+    language_options = [ENGLISH_OPTION] + available_languages()
+    selected_language = st.selectbox(
+        "Output language",
+        language_options,
+        key="output_language",
+        help="Translate matched ARC questions/choices into another language "
+        "(via ARC-Translations) before export. Newly created questions have "
+        "no ARC variable to translate and stay in their original language.",
+    )
+    translation = (
+        _load_translation_cached(selected_language)
+        if selected_language != ENGLISH_OPTION
+        else None
+    )
+
     data_dictionary_df = build_data_dictionary(
-        _matched_arc_rows(), st.session_state.arc_catalog_df, st.session_state.decisions
+        _matched_arc_rows(),
+        st.session_state.arc_catalog_df,
+        st.session_state.decisions,
+        translation=translation,
     )
     dictionary_bytes = data_dictionary_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
