@@ -10,3 +10,4 @@ __pycache__/
 graft/
 .DS_Store
 /index_data
+/translations_data
