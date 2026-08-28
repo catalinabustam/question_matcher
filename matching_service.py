@@ -32,6 +32,14 @@ def _clean_options_text(options: Optional[str]) -> str:
     return ", ".join(part for part in cleaned_parts if part)
 
 
+def definition_with_options(source: Question) -> str:
+    definition = source.translated_definition or source.definition or ""
+    options = _clean_options_text(source.translated_options or source.options)
+    if not options:
+        return definition
+    return f"{definition}. {options}".strip(". ")
+
+
 class QuestionMatchingService:
     """Finds the best reference candidates for a given source question."""
 
@@ -74,12 +82,14 @@ class QuestionMatchingService:
         resolved independently):
         1. `override_question` / `override_definition`: manually edited by
            the user (allows recalculating without depending on the
-           automatic translation).
-        2. `source.translated_question` / `source.translated_definition`.
-        3. `source.question` / `source.definition`, if no translation was made.
-
-        The source question's answer options (translated, if available) are
-        also appended to the query, 
+           automatic translation). `override_definition`, when given, is
+           used verbatim — it already includes the source question's
+           cleaned answer options, since that's what the editable
+           "Translated definition" box shows by default (see
+           `definition_with_options`).
+        2. `source.translated_question` / `definition_with_options(source)`.
+        3. `source.question` / `source.definition`, if no translation was made
+           (still with cleaned options appended to the definition half).
 
         Parameters
         ----------
@@ -97,13 +107,13 @@ class QuestionMatchingService:
         before RRF fusion.
         """
         query_question = override_question or source.translated_question or source.question
-        query_definition = (override_definition or source.translated_definition
-                             or source.definition or "")
-        query_options = _clean_options_text(source.translated_options or source.options)
+        query_definition = (
+            override_definition
+            if override_definition is not None
+            else definition_with_options(source)
+        )
 
         query = f"{query_question}. {query_definition}".strip()
-        if query_options:
-            query = f"{query}. {query_options}".strip()
 
         if not self._reference:
             return []
