@@ -1,7 +1,8 @@
 # Question Matcher
 
 A very lightweight Streamlit app (`streamlit` + `pandas` + `requests`, plus
-`deepl` for optional translation) to compare a CSV of questions against the
+`deepl` for optional DeepL translation — Ollama needs no extra package,
+just a running local instance) to compare a CSV of questions against the
 [ISARIC ARC](https://github.com/ISARICResearch/ARC) reference catalog, match
 each question to its equivalent, or create a new question when no match
 exists.
@@ -43,23 +44,33 @@ they're missing it shows an error telling you to run the build script.
 The catalog's columns (`Section`, `Question`, `Answer Options`, `Type`, ...)
 go through the same column mapping as the source CSV.
 
-## Translation with DeepL (optional)
+## Translation (optional)
 
 If the CSV to process is in a different language than the reference catalog
-(English), you can enable automatic translation with
-[DeepL](https://www.deepl.com/pro-api):
+(English), you can enable automatic translation via
+[DeepL](https://www.deepl.com/pro-api) or a local [Ollama](https://ollama.com)
+model:
 
-1. Get an API key from your DeepL account (Free or Pro plan).
-2. Set it as the `DEEPL_API_KEY` environment variable (e.g. in `.env`), or
-   paste it directly into the sidebar.
-3. Check **"Translate source CSV questions before comparing"** and, if
-   needed, pick the source language (target is fixed to English, matching
-   the ARC catalog).
+- **DeepL** needs an API key (Free or Pro plan). Set it as the
+  `DEEPL_API_KEY` environment variable (e.g. in `.env`).
+- **Ollama** needs nothing but a running local instance — free, keyless,
+  and fully offline (no request ever leaves the machine). Set the
+  sidebar's "Ollama base URL" (default `http://localhost:11434`) and
+  "Ollama model" (default `llama3.2`) to match whatever you have pulled.
 
-When you start the comparison, the app translates all source questions in a
-single batch (with caching to avoid repeat translations), stores the
+Check **"Translate source CSV questions before comparing"**, pick a
+provider, and, if needed, the source language (target is fixed to English,
+matching the ARC catalog).
+
+When you start the comparison, the app translates all source questions
+(with caching to avoid repeat translations), stores the
 translated text alongside the original, and uses **the translated text** to
-compute similarity against the reference catalog.
+compute similarity against the reference catalog. With Ollama, each
+question is translated in its own request rather than one big batch call —
+slower, but it guarantees every question gets translated correctly and
+independently, since a general-purpose local model can't reliably
+translate many texts in a single structured response the way DeepL's API
+can.
 
 For each question, the translated text is shown in an **editable box**. If
 the automatic translation isn't quite right, edit it and click
@@ -70,7 +81,7 @@ using your edited text instead of the automatic translation.
 
 1. **Upload files** (sidebar): upload only the CSV to process. Any separator
    (`,`, `;`, tab) is supported.
-2. **Translation (DeepL)**: optional, see the section above.
+2. **Translation**: optional, see the section above.
 3. **Column mapping**: specify which column in the source CSV — and in the
    downloaded ARC catalog — holds the question, section, answer type,
    answer options, and ID. Common column names (`Question`, `Section`,
@@ -116,7 +127,7 @@ over from the source question unchanged.
 | `matching_service.py`  | Business logic: candidate search against the reference catalog.           |
 | `rules.py`             | Fixed rules for building a new question (section + answer type).          |
 | `csv_io.py`            | **Repository** pattern: CSV loading and export, isolated from the UI.      |
-| `translate.py`         | Translation client (DeepL), isolated from the rest of the logic.           |
+| `translate.py`         | Translation clients (DeepL, Google Translate), isolated from the rest of the logic. |
 | `build_index.py`       | Standalone CLI: downloads the ARC catalog, builds the ChromaDB collections and BM25 index, persists them to disk. Run manually, not by the app. |
 | `vector_db.py`         | ChromaDB collection building (`build_index.py`) and loading (`app.py`).    |
 | `bm25.py`               | BM25 index building (`build_index.py`) and loading (`app.py`).            |
