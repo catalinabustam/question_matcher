@@ -21,11 +21,11 @@ from datadictionary import (
     available_field_types,
     build_data_dictionary,
 )
-from matching_service import QuestionMatchingService
+from matching_service import QuestionMatchingService, definition_with_options
 from models import MatchDecision, MatchStatus
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
-from translate import DeepLTranslator, OllamaTranslator, translate_questions
+from translate import deepl_translator, ollama_translator
 from translations import available_languages, load_translation
 from dotenv import load_dotenv
 from vector_db import (
@@ -107,20 +107,9 @@ def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = Fa
     return None if choice == NONE_OPTION else choice
 
 
-def _candidate_label(candidate, exact_match: bool = False) -> str:
-    badge = "  ·  🟢 Same ARC variable name" if exact_match else ""
+def _candidate_label(candidate) -> str:
     return (f"{candidate.question.question}  ·  section: {candidate.question.section or '—'}"
-            f"  ·  score: {candidate.score:.0%}{badge}")
-
-
-def _is_exact_variable_match(candidate, source) -> bool:
-    """Whether `candidate` has the exact same variable name as `source`.
-
-    A strong signal the two represent the same field — much stronger than
-    the text-similarity score — so it's used to pin the candidate first in
-    the list and pre-select it (see `_render_question_flow`).
-    """
-    return bool(source.variable) and candidate.question.variable == source.variable
+            f"  ·  score: {candidate.score:.0%}")
 
 
 def _existing_match_question_number(candidate, exclude_idx: int) -> int | None:
@@ -244,8 +233,7 @@ def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
     new_text: str, create_new: bool = False, ignore: bool = False,
     new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
-    new_variable_name_source: str = "",
-    new_text_source: str = "",
+    new_variable_name_source: str = "", new_text_source: str = "",
     new_options: str = "", new_field_note: str = "", new_validation_type: str = "",
     new_validation_min: str = "", new_validation_max: str = "",
     new_identifier: str = "", new_branching_logic: str = "",
@@ -257,12 +245,7 @@ def _save_decision(
     decision = st.session_state.decisions[idx]
     if create_new:
         matched_questions = [
-            c.question
-            for c in candidates
-            if _candidate_label(
-                c, exact_match=_is_exact_variable_match(c, decision.source)
-            )
-            in selected_labels
+            c.question for c in candidates if _candidate_label(c) in selected_labels
         ]
         sequence = (
             sum(
@@ -285,11 +268,11 @@ def _save_decision(
         decision.matches = matched_questions
         decision.new_id = new_field_name or preview["new_id"]
         decision.new_variable_name_source = new_variable_name_source
+        decision.new_text_source = new_text_source
         decision.new_form_name = new_form_name or preview["new_form_name"]
         decision.new_section = new_section or preview["new_section"]
         decision.new_field_type = new_field_type or preview["new_field_type"]
         decision.new_text = new_text or preview["new_text"]
-        decision.new_text_source = new_text_source
         decision.new_options = new_options or preview["new_options"]
         decision.new_field_note = new_field_note or preview["new_field_note"]
         decision.new_validation_type = new_validation_type or preview.get(
@@ -347,12 +330,7 @@ def _save_decision(
         decision.field_overrides = {}
     else:
         matched_questions = [
-            c.question
-            for c in candidates
-            if _candidate_label(
-                c, exact_match=_is_exact_variable_match(c, decision.source)
-            )
-            in selected_labels
+            c.question for c in candidates if _candidate_label(c) in selected_labels
         ]
         decision.status = MatchStatus.MATCHED
         decision.matched = matched_questions[0] if matched_questions else None
@@ -398,7 +376,7 @@ def _render_translation_form():
 
     translator_type = "DeepL"
     api_key = ""
-    ollama_model = None
+    ollama_model = ""
     ollama_base_url = "http://localhost:11434"
     source_lang = None
 
@@ -409,34 +387,19 @@ def _render_translation_form():
 
         if translator_type == "DeepL":
             api_key = os.getenv("DEEPL_API_KEY", "")
-            source_choice = st.sidebar.selectbox(
-                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
-            )
-            source_lang = None if source_choice == AUTO_DETECT else source_choice
         else:  # Ollama
             ollama_base_url = st.sidebar.text_input(
                 "Ollama base URL", value="http://localhost:11434"
             )
-            # Fetch available models
-            try:
-                available_models = OllamaTranslator.get_available_models(ollama_base_url)
-            except Exception:
-                available_models = []
+            ollama_model = st.sidebar.text_input("Ollama model", value="llama3.2")
 
-            if available_models:
-                ollama_model = st.sidebar.selectbox(
-                    "Ollama model", available_models, index=0
-                )
-            else:
-                st.sidebar.warning("No Ollama models found. Make sure Ollama is running.")
-                ollama_model = st.sidebar.text_input("Model name (manual)", value="llama3.2")
-
-            source_choice = st.sidebar.selectbox(
-                "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
-            )
-            source_lang = None if source_choice == AUTO_DETECT else source_choice
+        source_choice = st.sidebar.selectbox(
+            "Source language", [AUTO_DETECT] + DEEPL_LANGUAGES, index=0
+        )
+        source_lang = None if source_choice == AUTO_DETECT else source_choice
 
     return use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang
+
 
 
 def _render_search_scope(reference_df: pd.DataFrame) -> dict:
@@ -609,8 +572,7 @@ def _render_question_flow():
         )
         default_translation_definition = (
             getattr(decision, "edited_translated_definition", "")
-            or source.translated_definition
-            or source.definition
+            or definition_with_options(source)
         )
         translated_question_input = st.text_area(
             "Translated question (editable)",
@@ -621,12 +583,14 @@ def _render_question_flow():
             "then click 'Recalculate similarity' to refresh the suggested matches.",
         )
         translated_definition_input = st.text_area(
-            "Translated definition (editable)",
+            "Translated definition and options (editable)",
             value=default_translation_definition,
             key=f"translated_def_edit_{idx}",
             height=68,
-            help="Edit the text if the automatic translation isn't quite right, "
-            "then click 'Recalculate similarity' to refresh the suggested matches.",
+            help="Includes the question's answer options (numbers and punctuation "
+            "stripped) appended automatically. Edit the text if the automatic "
+            "translation isn't quite right, then click 'Recalculate similarity' "
+            "to refresh the suggested matches.",
         )
         if st.button("🔄 Recalculate similarity", key=f"recalc_{idx}"):
             decision.edited_translated_question = translated_question_input
@@ -645,22 +609,8 @@ def _render_question_flow():
         allowed_row_indices=st.session_state.get("allowed_row_indices"),
     )
 
-    # If one of the candidates has the exact same variable name as the
-    # source question, surface it first — it's almost certainly the right
-    # match, and matching by identical ARC-style ID is a much stronger
-    # signal than the text-similarity score.
-    exact_match_pos = next(
-        (i for i, c in enumerate(candidates) if _is_exact_variable_match(c, source)),
-        None,
-    )
-    if exact_match_pos is not None and exact_match_pos != 0:
-        candidates.insert(0, candidates.pop(exact_match_pos))
-
     num_candidates = len(candidates)
-    visible_labels = [
-        _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
-        for c in candidates
-    ]
+    visible_labels = [_candidate_label(c) for c in candidates]
 
     if not candidates:
         st.warning(
@@ -676,7 +626,7 @@ def _render_question_flow():
     default_selected = set()
     if decision.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
         default_selected = {
-            _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
+            _candidate_label(c)
             for c in candidates
             if any(
                 matched.row_index == c.question.row_index
@@ -708,9 +658,7 @@ def _render_question_flow():
     selected_match_labels = []
     with st.container(height=300):
         for i, candidate in enumerate(candidates):
-            label = _candidate_label(
-                candidate, exact_match=_is_exact_variable_match(candidate, source)
-            )
+            label = _candidate_label(candidate)
             key = f"candidate_{idx}_{i}"
 
             if key not in st.session_state:
@@ -863,10 +811,9 @@ def _render_question_flow():
                 help="Select the form this question belongs to",
             )
         with col2:
-            preferred_field_type = decision.new_field_type or preview["new_field_type"]
             default_field_type = (
-                preferred_field_type
-                if preferred_field_type in field_type_options
+                decision.new_field_type
+                if decision.new_field_type in field_type_options
                 else ("text" if "text" in field_type_options else field_type_options[0])
             )
             new_field_type = st.selectbox(
@@ -942,35 +889,29 @@ def _render_question_flow():
 
         # Row 3: Field Label (Question text)
         has_translation = bool(
-            source.translated_question
-            and source.translated_question != source.question
+            source.translated_question and source.translated_question != source.question
         )
+        new_text_source_key = f"text_src_{idx}"
         if has_translation:
-            label_source_key = f"label_src_{idx}"
-            if label_source_key not in st.session_state:
-                st.session_state[label_source_key] = (
-                    "Use original question"
-                    if decision.new_text_source == "original"
-                    else "Use translated question"
+            if new_text_source_key not in st.session_state:
+                st.session_state[new_text_source_key] = (
+                    decision.new_text_source or "Use translated text"
                 )
-            label_source_choice = st.radio(
+            new_text_source = st.radio(
                 "Field Label source",
-                ["Use translated question", "Use original question"],
-                key=label_source_key,
+                ["Use translated text", "Use original text"],
+                key=new_text_source_key,
                 horizontal=True,
-                help="Choose whether the Field Label below starts from the "
-                "translated question text or the original source text. "
+                help="Choose whether the suggested Field Label below starts "
+                "from the translated question or the original source text. "
                 "Either way, you can still edit it freely.",
             )
         else:
-            label_source_choice = "Use original question"
-        new_text_source = (
-            "translated" if label_source_choice == "Use translated question" else "original"
-        )
+            new_text_source = "Use original text"
 
         suggested_text = (
             source.translated_question
-            if new_text_source == "translated" and source.translated_question
+            if new_text_source == "Use translated text" and source.translated_question
             else source.question
         )
 
@@ -1139,14 +1080,7 @@ def _render_question_flow():
     matched_variable_conflicts: list[str] = []
     if not create_new and not ignore and selected_match_labels:
         for label in selected_match_labels:
-            candidate = next(
-                c
-                for c in candidates
-                if _candidate_label(
-                    c, exact_match=_is_exact_variable_match(c, source)
-                )
-                == label
-            )
+            candidate = next(c for c in candidates if _candidate_label(c) == label)
             existing_q_num = _existing_match_question_number(candidate, idx)
             if existing_q_num is not None:
                 matched_variable_conflicts.append(
@@ -1157,8 +1091,7 @@ def _render_question_flow():
         matched_for_mix = next(
             c.question
             for c in candidates
-            if _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
-            == selected_match_labels[0]
+            if _candidate_label(c) == selected_match_labels[0]
         )
         with st.container(border=True):
             st.markdown("**🔀 Mixed match — choose ARC vs. source per field**")
@@ -1470,22 +1403,25 @@ def main():
                 reference_qs = QuestionCsvRepository.load(df_expanded, results_r)
 
                 if use_translation:
+                    if translator_type == "DeepL" and not api_key:
+                        st.error(
+                            "A DeepL API key is required — set DEEPL_API_KEY "
+                            "in your environment."
+                        )
+                        return
+                    if translator_type == "Ollama" and not ollama_model:
+                        st.error("Please select an Ollama model.")
+                        return
                     try:
-                        if translator_type == "DeepL":
-                            translator = DeepLTranslator(api_key)
-                            with st.spinner("Translating questions with DeepL..."):
-                                source_qs = translate_questions(
-                                    translator, questions=source_qs, source_lang=source_lang
-                                )
-                        else:  # Ollama
-                            if not ollama_model:
-                                st.error("Please select an Ollama model.")
-                                return
-                            translator = OllamaTranslator(ollama_model, ollama_base_url)
-                            with st.spinner(f"Translating questions with Ollama ({ollama_model})..."):
-                                source_qs = translate_questions(
-                                    translator, questions=source_qs, source_lang=source_lang
-                                )
+                        translator = (
+                            deepl_translator(api_key)
+                            if translator_type == "DeepL"
+                            else ollama_translator(ollama_model, ollama_base_url)
+                        )
+                        with st.spinner(f"Translating questions with {translator_type}..."):
+                            source_qs = translator.translate_questions(
+                                source_qs, source_lang=source_lang
+                            )
                     except Exception as exc:
                         st.error(f"Error translating: {exc}")
                         return
