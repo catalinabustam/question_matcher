@@ -50,6 +50,36 @@ class Question:
     question_number: str | None = None
 
 
+# Plain string fields on `MatchDecision` that round-trip through
+# `to_dict`/`from_dict` unchanged (i.e. everything except `source`, `status`,
+# `matched`/`matches`, and `field_overrides`, which all need their own
+# handling — see those methods).
+_DECISION_STR_FIELDS = (
+    "new_section",
+    "new_text",
+    "new_id",
+    "new_variable_name_source",
+    "new_text_source",
+    "new_form_name",
+    "new_field_type",
+    "new_options",
+    "new_field_note",
+    "new_validation_type",
+    "new_validation_min",
+    "new_validation_max",
+    "new_identifier",
+    "new_branching_logic",
+    "new_required_field",
+    "new_custom_alignment",
+    "new_field_annotation",
+    "new_matrix_group_name",
+    "new_matrix_ranking",
+    "new_question_number",
+    "edited_translated_question",
+    "edited_translated_definition",
+)
+
+
 @dataclass
 class MatchCandidate:
     """A match candidate with its similarity score (0.0 - 1.0)."""
@@ -101,3 +131,41 @@ class MatchDecision:
         if self.matched:
             return [self.matched]
         return []
+
+    def to_dict(self) -> dict:
+        """Serialize this decision for `progress_io.build_progress_dict`.
+
+        `source` isn't included — it's re-derived from the re-uploaded
+        source CSV when resuming, and matched questions are stored by
+        `row_index` (not the full `Question`) so they can be re-attached to
+        whatever reference catalog is loaded at resume time.
+        """
+        data = {name: getattr(self, name) for name in _DECISION_STR_FIELDS}
+        data["status"] = self.status.value
+        data["matched_row_indices"] = [q.row_index for q in self.matched_questions]
+        data["field_overrides"] = dict(self.field_overrides)
+        return data
+
+    @classmethod
+    def from_dict(
+        cls, data: dict, source: Question, reference_by_row_index: dict[int, Question]
+    ) -> "MatchDecision":
+        """Rebuild a decision saved by `to_dict`.
+
+        `reference_by_row_index` resolves `matched_row_indices` back into
+        `Question` objects — any row_index no longer present (e.g. the ARC
+        index was rebuilt in between) is silently dropped rather than
+        raising, since a stale match is still recoverable by hand.
+        """
+        decision = cls(source=source)
+        decision.status = MatchStatus(data.get("status", MatchStatus.PENDING.value))
+        decision.matches = [
+            reference_by_row_index[row_index]
+            for row_index in data.get("matched_row_indices", [])
+            if row_index in reference_by_row_index
+        ]
+        decision.matched = decision.matches[0] if decision.matches else None
+        for name in _DECISION_STR_FIELDS:
+            setattr(decision, name, data.get(name, ""))
+        decision.field_overrides = dict(data.get("field_overrides", {}))
+        return decision
