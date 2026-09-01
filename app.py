@@ -590,7 +590,7 @@ def _render_progress():
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
     )
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
-    pending = total - matched - created - ignored
+    resolved = sum(1 for d in decisions if d.status != MatchStatus.PENDING)
     pending = total - resolved
 
     cols = st.columns(5)
