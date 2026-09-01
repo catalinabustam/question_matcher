@@ -102,6 +102,29 @@ using your edited text instead of the automatic translation.
    matched reference question (if any), the newly built question (if any),
    and a `final_question` column that consolidates the result.
 
+## Saving and resuming progress
+
+`st.session_state` doesn't survive a page refresh — closing the tab or
+reloading loses every decision made so far. To avoid re-doing work:
+
+- While matching is in progress, click **"💾 Save progress"** in the
+  sidebar to download a small JSON file with every decision made so far
+  (status, matches, new-question fields, per-field overrides), where you
+  left off, and the name of the source CSV it was saved from.
+- To resume later, first re-upload the **same source CSV** under
+  **"1. Upload source CSV"** and redo the column mapping (common column
+  names are pre-selected automatically). Then upload the saved JSON under
+  **"2. Resume progress (optional)"** — if its filename doesn't match the
+  CSV you just uploaded, a warning is shown right away. Click
+  **"🔄 Resume from saved progress"** instead of "Start comparison".
+
+Only the decisions are saved — the source CSV and column mapping must be
+supplied again when resuming, since decisions are re-attached to the
+re-loaded source questions by position and to matched ARC rows by their
+catalog row index. If the ARC reference index was rebuilt (`build_index.py`
+run again) between saving and resuming, a warning is shown since some
+matches may not restore correctly and should be reviewed.
+
 ## Creation rules (`rules.py`)
 
 There is no user-editable template for new questions. Instead, `rules.py`
@@ -127,6 +150,7 @@ over from the source question unchanged.
 | `matching_service.py`  | Business logic: candidate search against the reference catalog.           |
 | `rules.py`             | Fixed rules for building a new question (section + answer type).          |
 | `csv_io.py`            | **Repository** pattern: CSV loading and export, isolated from the UI.      |
+| `progress_io.py`       | Save/restore an in-progress matching session as a JSON file, so a page refresh doesn't lose decisions. |
 | `translate.py`         | Translation clients (DeepL, Google Translate), isolated from the rest of the logic. |
 | `build_index.py`       | Standalone CLI: downloads the ARC catalog, builds the ChromaDB collections and BM25 index, persists them to disk. Run manually, not by the app. |
 | `vector_db.py`         | ChromaDB collection building (`build_index.py`) and loading (`app.py`).    |
