@@ -11,7 +11,7 @@ from datadictionary import (
 )
 from models import MatchDecision, MatchStatus, Question
 
-_OVERRIDABLE_FIELDS = ("question", "options", "field_type", "validation")
+_OVERRIDABLE_FIELDS = ("question", "options", "field_type", "section", "validation")
 
 
 def _resolved_field(decision: MatchDecision, matched: Question, key: str) -> str:
@@ -23,6 +23,7 @@ def _resolved_field(decision: MatchDecision, matched: Question, key: str) -> str
         "question": matched.question,
         "options": matched.options,
         "field_type": matched.field_type,
+        "section": matched.section,
         "validation": matched.validation,
     }[key]
     return arc_value or ""
@@ -98,6 +99,7 @@ class QuestionCsvRepository:
                     }
                     rows.append(
                         {
+                            "source_question_index": d.source.row_index + 1,
                             "original_section": d.source.section,
                             "original_topic": d.source.topic or "",
                             "original_answer_type": d.source.field_type or "",
@@ -116,6 +118,7 @@ class QuestionCsvRepository:
                             "question_source": d.field_overrides.get("question", "arc"),
                             "options_source": d.field_overrides.get("options", "arc"),
                             "type_source": d.field_overrides.get("field_type", "arc"),
+                            "section_source": d.field_overrides.get("section", "arc"),
                             "validation_source": d.field_overrides.get(
                                 "validation", "arc"
                             ),
@@ -141,6 +144,7 @@ class QuestionCsvRepository:
             if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED):
                 rows.append(
                     {
+                        "source_question_index": d.source.row_index + 1,
                         "original_section": d.source.section,
                         "original_topic": d.source.topic or "",
                         "original_answer_type": d.source.field_type or "",
@@ -160,6 +164,7 @@ class QuestionCsvRepository:
                         "options_source": "",
                         "type_source": "",
                         "validation_source": "",
+                        "section_source": "",
                         # Data dictionary fields for newly created questions
                         "new_question_id": d.new_id,
                         "new_form_name": d.new_form_name,

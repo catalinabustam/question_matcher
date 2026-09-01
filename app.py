@@ -8,6 +8,7 @@ Flow:
 3. A final CSV is exported with the original question, the matched one (if
    any), and/or the newly built question. Ignored questions are left out.
 """
+import json
 import os
 from collections import defaultdict
 
@@ -23,6 +24,12 @@ from datadictionary import (
 )
 from matching_service import QuestionMatchingService, definition_with_options
 from models import MatchDecision, MatchStatus
+from progress_io import (
+    build_progress_dict,
+    load_progress_dict,
+    peek_source_filename,
+    restore_decisions,
+)
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
 from translate import deepl_translator, ollama_translator
@@ -190,7 +197,7 @@ def _on_candidate_change(idx: int, candidate_key: str, candidate):
 
 
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
-                   arc_catalog_df: pd.DataFrame, scope_filters: dict):
+                   arc_catalog_df: pd.DataFrame, scope_filters: dict, source_filename: str = ""):
     st.session_state.source_questions = source_qs
     st.session_state.decisions = [MatchDecision(source=q) for q in source_qs]
     st.session_state.matcher = matcher
@@ -201,6 +208,7 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     st.session_state.scope_filters = scope_filters
   
     st.session_state.arc_catalog_df = arc_catalog_df
+    st.session_state.source_filename = source_filename
 
 
 def _reset_session():
@@ -218,6 +226,7 @@ def _reset_session():
         "arc_scope_values_Form",
         "arc_scope_values_Section",
         "allowed_row_indices",
+        "source_filename",
     ):
         st.session_state.pop(key, None)
 
@@ -385,14 +394,37 @@ def _save_decision(
 
 
 def _render_sidebar_upload():
-    st.sidebar.header("1. Upload files")
+    st.sidebar.header("1. Upload source CSV")
     separator = st.sidebar.selectbox("CSV separator", [",", ";", "\t"], index=0)
     source_file = st.sidebar.file_uploader("CSV to process", type="csv")
     return separator, source_file
 
 
+def _render_sidebar_resume_upload(source_filename: str = ""):
+    st.sidebar.header("2. Resume progress (optional)")
+    st.sidebar.caption(
+        "Already started matching this same CSV? Upload the progress file "
+        "you saved earlier to pick up where you left off."
+    )
+    progress_file = st.sidebar.file_uploader(
+        "Saved progress file (.json)",
+        type="json",
+        help="Upload a file saved earlier with '💾 Save progress', then "
+        "click 'Resume from saved progress'.",
+    )
+    if progress_file is not None and source_filename:
+        saved_filename = peek_source_filename(progress_file.getvalue())
+        if saved_filename and saved_filename != source_filename:
+            st.sidebar.warning(
+                f"This progress file was saved from '{saved_filename}', but "
+                f"you uploaded '{source_filename}' above. Resuming with a "
+                "different CSV may not restore decisions correctly."
+            )
+    return progress_file
+
+
 def _render_translation_form():
-    st.sidebar.header("2. Translation")
+    st.sidebar.header("3. Translation")
     use_translation = st.sidebar.checkbox(
         "Translate source CSV questions before comparing", value=False
     )
@@ -427,7 +459,7 @@ def _render_translation_form():
 
 def _render_search_scope(reference_df: pd.DataFrame) -> dict:
     """Sidebar UI for the Form and Section search scope selected at startup."""
-    st.sidebar.header("3. Search scope (optional)")
+    st.sidebar.header("4. Search scope (optional)")
     st.sidebar.caption("Choose ARC forms or sections before matching starts.")
 
     filters = {}
@@ -452,7 +484,7 @@ def _render_search_scope(reference_df: pd.DataFrame) -> dict:
 def _render_candidate_filter(reference_df: pd.DataFrame,
                              scope_filters: dict | None = None) -> dict:
     """Sidebar UI for narrowing candidates while matching is in progress."""
-    st.sidebar.header("4. Filter candidates (optional)")
+    st.sidebar.header("5. Filter candidates (optional)")
     st.sidebar.caption("Restrict which ARC rows can be suggested as matches.")
 
     available_df = reference_df
@@ -558,7 +590,8 @@ def _render_progress():
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
     )
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
-    pending = total - matched - created - ignored
+    resolved = sum(1 for d in decisions if d.status != MatchStatus.PENDING)
+    pending = total - resolved
 
     cols = st.columns(5)
     cols[0].metric("Total", total)
@@ -566,7 +599,7 @@ def _render_progress():
     cols[2].metric("New", created)
     cols[3].metric("Ignored", ignored)
     cols[4].metric("Pending", pending)
-    st.progress((matched + created + ignored) / total if total else 0)
+    st.progress(resolved / total if total else 0)
 
 
 def _render_question_flow():
@@ -935,7 +968,7 @@ def _render_question_flow():
         if has_translation:
             if new_text_source_key not in st.session_state:
                 st.session_state[new_text_source_key] = (
-                    decision.new_text_source or "Use translated text"
+                    decision.new_text_source or "Use original text"
                 )
             new_text_source = st.radio(
                 "Field Label source",
@@ -1149,6 +1182,7 @@ def _render_question_flow():
                 ("options", "Options"),
                 ("field_type", "Type"),
                 ("validation", "Validation"),
+                ("section", "Section"),
             ]
 
             def _sync_bulk_checkbox(changed_key: str, other_key: str) -> None:
@@ -1196,7 +1230,7 @@ def _render_question_flow():
                 )
                 if remember_choice:
                     _remember_bulk_choice(idx)
-            mix_cols = st.columns(4)
+            mix_cols = st.columns(5)
             for col, (key, label) in zip(mix_cols, mix_specs):
                 if use_source:
                     default = "Use source"
@@ -1229,14 +1263,14 @@ def _render_question_flow():
             }
             st.caption(
                 f"Effective — text: {resolved['question']!r} · options: {resolved['options']!r} · "
-                f"type: {resolved['field_type']!r} · validation: {resolved['validation']!r}"
+                f"type: {resolved['field_type']!r} · section: {resolved['section']!r}"
             )
 
             mixed_match_errors, mixed_match_warnings = validate_record(
                 {
                     "variable": matched_for_mix.variable,
                     "form_name": matched_for_mix.form_name or "",
-                    "section": matched_for_mix.section or "",
+                    "section": resolved["section"],
                     "field_type": resolved["field_type"],
                     "label": resolved["question"],
                     "choices": resolved["options"],
@@ -1337,9 +1371,30 @@ def _render_export():
     st.divider()
     st.subheader("4. Export result")
     st.caption('Questions marked "ignore" are excluded from this export.')
-    df = QuestionCsvRepository.export(st.session_state.decisions)
-    st.dataframe(df, use_container_width=True, height=250)
-    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    export_df = QuestionCsvRepository.export(st.session_state.decisions)
+    display_df = export_df.copy()
+
+    st.caption("Click a row to jump back to its original source question.")
+    export_table = st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=250,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    selection = getattr(export_table, "selection", None)
+    if selection is not None and getattr(selection, "rows", None):
+        target_row = selection.rows[0]
+        source_index_column = "source_question_index"
+        if source_index_column in display_df.columns:
+            target_index = int(display_df.iloc[target_row][source_index_column]) - 1
+            if 0 <= target_index < len(st.session_state.source_questions):
+                if target_index != st.session_state.current_idx:
+                    st.session_state.current_idx = target_index
+                    st.rerun()
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "⬇ Download result CSV",
         csv_bytes,
@@ -1393,7 +1448,30 @@ def main():
     st.title("Question Matcher against a Reference Catalog")
 
     separator, source_file = _render_sidebar_upload()
+    progress_file = _render_sidebar_resume_upload(
+        source_filename=source_file.name if source_file else ""
+    )
     use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang = _render_translation_form()
+
+    if st.session_state.get("flow_started"):
+        st.sidebar.header("Save progress")
+        progress_bytes = json.dumps(
+            build_progress_dict(
+                st.session_state.decisions,
+                st.session_state.current_idx,
+                reference_row_count=len(st.session_state.reference_df),
+                source_filename=st.session_state.get("source_filename", ""),
+            ),
+            indent=2,
+        ).encode("utf-8")
+        st.sidebar.download_button(
+            "💾 Save progress",
+            progress_bytes,
+            file_name="matching_progress.json",
+            mime="application/json",
+            help="Download your decisions so far. Resume later by "
+            "re-uploading the source CSV and this file.",
+        )
 
     if st.sidebar.button("Reset"):
         _reset_session()
@@ -1440,7 +1518,9 @@ def main():
             )
 
             if st.button(
-                "Start comparison", type="primary", disabled=not results_s["question"]
+                "🔄 Resume from saved progress" if progress_file else "Start comparison",
+                type="primary",
+                disabled=not results_s["question"],
             ):
                 source_qs = QuestionCsvRepository.load(source_df, results_s)
                 # IMPORTANT: loaded from `df_expanded`, not `reference_df`. The
@@ -1487,13 +1567,52 @@ def main():
                     metadata_filters=metadata_filters,
                 )
 
-                _init_session(source_qs, matcher, df_expanded, reference_df, scope_filters)
+                _init_session(
+                    source_qs, matcher, df_expanded, reference_df, scope_filters,
+                    source_filename=source_file.name,
+                )
+
+                if progress_file is not None:
+                    try:
+                        progress = load_progress_dict(progress_file.getvalue())
+                        decisions, current_idx = restore_decisions(
+                            progress, source_qs, reference_qs
+                        )
+                    except ValueError as exc:
+                        st.error(f"Could not resume progress: {exc}")
+                        _reset_session()
+                        return
+                    warnings = []
+                    saved_filename = progress.get("source_filename")
+                    if saved_filename and saved_filename != source_file.name:
+                        warnings.append(
+                            f"This progress file was saved from '{saved_filename}', "
+                            f"but you uploaded '{source_file.name}' — some "
+                            "decisions may not have been restored correctly."
+                        )
+                    if progress.get("reference_row_count") not in (None, len(df_expanded)):
+                        warnings.append(
+                            "The reference catalog size has changed since this "
+                            "progress file was saved — some matched questions "
+                            "may not have been restored correctly."
+                        )
+                    if warnings:
+                        st.session_state.resume_warning = (
+                            " ".join(warnings) + " Review them before exporting."
+                        )
+                    st.session_state.decisions = decisions
+                    st.session_state.current_idx = current_idx
+
                 st.rerun()
         else:
             st.info(
                 "Upload the CSV to process and the reference CSV in the sidebar to get started."
             )
         return
+
+    resume_warning = st.session_state.pop("resume_warning", None)
+    if resume_warning:
+        st.warning(resume_warning)
 
     _render_progress()
 

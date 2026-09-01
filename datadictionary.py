@@ -143,6 +143,7 @@ _OVERRIDE_COLUMNS = {
     "options": "Answer Options",
     "field_type": "Type",
     "validation": "Validation",
+    "section": "Section"
 }
 
 
@@ -523,7 +524,7 @@ def available_field_types(arc_catalog_df: pd.DataFrame) -> list[str]:
 
 
 def _source_field_value(decision: MatchDecision, key: str) -> str:
-    """The source-question value for one of the four overridable fields."""
+    """The source-question value for one of the overridable fields."""
     source = decision.source
     if key == "question":
         return (
@@ -538,6 +539,8 @@ def _source_field_value(decision: MatchDecision, key: str) -> str:
         return source.field_type or ""
     if key == "validation":
         return source.validation or ""
+    if key == "section":
+        return source.section or ""
     return ""
 
 
