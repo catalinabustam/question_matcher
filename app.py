@@ -196,6 +196,12 @@ def _on_candidate_change(idx: int, candidate_key: str, candidate):
     )
 
 
+def _deselect_all_candidates(idx: int, num_candidates: int):
+    """Callback to deselect all candidate checkboxes."""
+    for i in range(num_candidates):
+        st.session_state[f"candidate_{idx}_{i}"] = False
+
+
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
                    arc_catalog_df: pd.DataFrame, scope_filters: dict, source_filename: str = ""):
     st.session_state.source_questions = source_qs
@@ -754,8 +760,16 @@ def _render_question_flow():
                     arc_row.astype(str).rename("Value"), use_container_width=True
                 )
 
-    st.caption(
+    count_col, deselect_col = st.columns([5, 1])
+    count_col.caption(
         f"✅ {len(selected_match_labels)} of {num_candidates} candidate(s) selected for matching."
+    )
+    deselect_col.button(
+        "Deselect all",
+        key=f"deselect_all_{idx}",
+        disabled=not selected_match_labels,
+        on_click=_deselect_all_candidates,
+        args=(idx, num_candidates),
     )
 
     if create_new_key not in st.session_state:
@@ -1167,120 +1181,121 @@ def _render_question_flow():
                     f"Variable '{candidate.question.variable}' is already matched to source question {existing_q_num}"
                 )
 
-    if not create_new and not ignore and len(selected_match_labels) == 1:
-        matched_for_mix = next(
+    if not create_new and not ignore and selected_match_labels:
+        # For multiple matches, apply the same field overrides to all matched questions
+        matched_questions = [
             c.question
             for c in candidates
             if _candidate_label(c, exact_match=_is_exact_variable_match(c, source))
-            == selected_match_labels[0]
-        )
+            in selected_match_labels
+        ]
         with st.container(border=True):
-            st.markdown("**🔀 Mixed match — choose ARC vs. source per field**")
-            field_overrides = {}
+            if len(matched_questions) == 1:
+                st.markdown("**🔀 Mixed match — pick which fields come from the source CSV**")
+            else:
+                st.markdown(f"**🔀 Mixed match ({len(matched_questions)} questions) — pick which fields come from the source CSV**")
+                st.caption(
+                    "The same field selections will apply to all matched ARC questions."
+                )
+            st.caption(
+                "Every field defaults to the ARC reference. Select any fields "
+                "below to pull them from the source question instead."
+            )
+
             mix_specs = [
+                ("form_name", "Form name"),
                 ("question", "Question text"),
                 ("options", "Options"),
                 ("field_type", "Type"),
                 ("validation", "Validation"),
                 ("section", "Section"),
+                ("branching_logic", "Branching logic"),
+                ("field_note", "Field note"),
+                ("identifier", "Identifier"),
+                ("required_field", "Required field"),
+                ("custom_alignment", "Custom alignment"),
+                ("question_number", "Question number"),
+                ("matrix_group", "Matrix group name"),
+                ("matrix_ranking", "Matrix ranking"),
+                ("field_annotation", "Field annotation"),
             ]
+            all_labels = [label for _, label in mix_specs]
 
-            def _sync_bulk_checkbox(changed_key: str, other_key: str) -> None:
-                if st.session_state[changed_key]:
-                    st.session_state[other_key] = False
+            # Seeded once per question from the saved decision (or the
+            # remembered bulk default from a previous question), then left
+            # entirely to the multiselect widget's own session state.
+            fields_key = f"mix_source_fields_{idx}"
+            if fields_key not in st.session_state:
+                default_source = st.session_state.get("mixed_match_default")
+                st.session_state[fields_key] = [
+                    label
+                    for key, label in mix_specs
+                    if decision.field_overrides.get(key, default_source) == "source"
+                ]
 
-            def _remember_bulk_choice(idx: int) -> None:
-                if not st.session_state.get(f"mix_remember_{idx}"):
-                    return
-                if st.session_state.get(f"mix_arc_{idx}"):
+            bulk_cols = st.columns([1.3, 1.3, 2.4])
+            if bulk_cols[0].button("Use ARC for all fields", key=f"mix_all_arc_{idx}"):
+                st.session_state[fields_key] = []
+                st.rerun()
+            if bulk_cols[1].button("Use source for all fields", key=f"mix_all_source_{idx}"):
+                st.session_state[fields_key] = list(all_labels)
+                st.rerun()
+            remember_choice = bulk_cols[2].checkbox(
+                "Remember this choice for next questions",
+                key=f"mix_remember_{idx}",
+                help="Starts the next questions' field picker as all-ARC or "
+                "all-source, matching whichever one this question ends up with.",
+            )
+
+            source_field_labels = st.multiselect(
+                "Fields to take from the source CSV",
+                options=all_labels,
+                key=fields_key,
+                help="Unselected fields use the ARC reference; selected fields use the source CSV.",
+            )
+            field_overrides = {
+                key: ("source" if label in source_field_labels else "arc")
+                for key, label in mix_specs
+            }
+
+            if remember_choice:
+                if not source_field_labels:
                     st.session_state.mixed_match_default = "arc"
-                elif st.session_state.get(f"mix_source_{idx}"):
+                elif set(source_field_labels) == set(all_labels):
                     st.session_state.mixed_match_default = "source"
 
-            def _clear_bulk_checkboxes() -> None:
-                st.session_state[f"mix_arc_{idx}"] = False
-                st.session_state[f"mix_source_{idx}"] = False
-
-            with st.popover("Bulk field selection"):
-                bulk_cols = st.columns(2)
-                remembered_default = st.session_state.get(
-                    "mixed_match_default", "arc"
-                )
-                use_arc = bulk_cols[0].checkbox(
-                    "Use ARC for all fields",
-                    value=remembered_default == "arc",
-                    key=f"mix_arc_{idx}",
-                    on_change=_sync_bulk_checkbox,
-                    args=(f"mix_arc_{idx}", f"mix_source_{idx}"),
-                    help="Use ARC for the four fields below; the variable name stays the ARC name.",
-                )
-                use_source = bulk_cols[1].checkbox(
-                    "Use source for all fields",
-                    value=remembered_default == "source",
-                    key=f"mix_source_{idx}",
-                    on_change=_sync_bulk_checkbox,
-                    args=(f"mix_source_{idx}", f"mix_arc_{idx}"),
-                    help="Use source for the four fields below; the variable name stays the ARC name.",
-                )
-                remember_choice = st.checkbox(
-                    "Remember this choice for next questions",
-                    key=f"mix_remember_{idx}",
-                    on_change=_remember_bulk_choice,
-                    args=(idx,),
-                )
-                if remember_choice:
-                    _remember_bulk_choice(idx)
-            mix_cols = st.columns(5)
-            for col, (key, label) in zip(mix_cols, mix_specs):
-                if use_source:
-                    default = "Use source"
-                elif use_arc:
-                    default = "Use ARC"
-                else:
-                    default = (
-                        "Use source"
-                        if decision.field_overrides.get(key) == "source"
-                        else "Use ARC"
-                    )
-                if use_arc or use_source:
-                    st.session_state[f"mix_{key}_{idx}"] = default
-                choice = col.radio(
-                    label,
-                    ["Use ARC", "Use source"],
-                    index=["Use ARC", "Use source"].index(default),
-                    key=f"mix_{key}_{idx}",
-                    on_change=_clear_bulk_checkboxes,
-                )
-                field_overrides[key] = "source" if choice == "Use source" else "arc"
-
+            # Show effective values for the first matched question as reference
+            matched_for_display = matched_questions[0]
             resolved = {
                 key: (
                     _source_field_value(decision, key)
                     if field_overrides[key] == "source"
-                    else (getattr(matched_for_mix, key) or "")
+                    else (getattr(matched_for_display, key) or "")
                 )
                 for key, _ in mix_specs
             }
             st.caption(
-                f"Effective — text: {resolved['question']!r} · options: {resolved['options']!r} · "
-                f"type: {resolved['field_type']!r} · section: {resolved['section']!r}"
+                f"Effective (applied to all {len(matched_questions)} matches) — form: {resolved['form_name']!r} · text: {resolved['question']!r} · "
+                f"options: {resolved['options']!r} · type: {resolved['field_type']!r} · "
+                f"section: {resolved['section']!r}"
             )
 
+            # Validate against the first matched question as representative
             mixed_match_errors, mixed_match_warnings = validate_record(
                 {
-                    "variable": matched_for_mix.variable,
-                    "form_name": matched_for_mix.form_name or "",
+                    "variable": matched_for_display.variable,
+                    "form_name": resolved["form_name"],
                     "section": resolved["section"],
                     "field_type": resolved["field_type"],
                     "label": resolved["question"],
                     "choices": resolved["options"],
                     "validation_type": resolved["validation"],
-                    "validation_min": matched_for_mix.validation_min or "",
-                    "validation_max": matched_for_mix.validation_max or "",
-                    "branching_logic": matched_for_mix.branching_logic or "",
+                    "validation_min": matched_for_display.validation_min or "",
+                    "validation_max": matched_for_display.validation_max or "",
+                    "branching_logic": matched_for_display.branching_logic or "",
                 },
                 existing_ids=_existing_variable_ids(exclude=decision)
-                - {matched_for_mix.variable},
+                - {mq.variable for mq in matched_questions},
                 available_field_types=available_field_types(
                     st.session_state.reference_df
                 ),
@@ -1375,6 +1390,11 @@ def _render_export():
     display_df = export_df.copy()
 
     st.caption("Click a row to jump back to its original source question.")
+    # Show source_question_index as first column for easy navigation
+    if "source_question_index" in display_df.columns:
+        cols_order = ["source_question_index"] + [c for c in display_df.columns if c != "source_question_index"]
+        display_df = display_df[cols_order]
+
     export_table = st.dataframe(
         display_df,
         use_container_width=True,
