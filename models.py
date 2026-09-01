@@ -120,8 +120,8 @@ class MatchDecision:
     edited_translated_question: str = ""
     edited_translated_definition: str = ""
     # Per-field source for a MATCHED decision ("arc" or "source"), keyed by
-    # "question" / "options" / "field_type" / "validation". Only meaningful
-    # when status is MATCHED and exactly one question is matched.
+    # "question" / "options" / "field_type" / "section" / "validation".
+    # Only meaningful when status is MATCHED and exactly one question is matched.
     field_overrides: dict[str, str] = field(default_factory=dict)
 
     @property
