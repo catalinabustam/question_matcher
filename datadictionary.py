@@ -139,11 +139,21 @@ _RENAMABLE_COLUMNS = (
 # Maps a MatchDecision.field_overrides key to the ARC source column it
 # overrides when the decision picks "source" instead of "arc" for that field.
 _OVERRIDE_COLUMNS = {
+    "form_name": "Form",
     "question": "Question",
     "options": "Answer Options",
     "field_type": "Type",
     "validation": "Validation",
-    "section": "Section"
+    "section": "Section",
+    "branching_logic": "Skip Logic",
+    "field_note": "Field Note",
+    "identifier": "Identifier?",
+    "required_field": "Required Field?",
+    "custom_alignment": "Custom Alignment",
+    "question_number": "Question Number (surveys only)",
+    "matrix_group": "Matrix Group Name",
+    "matrix_ranking": "Matrix Ranking?",
+    "field_annotation": "Field Annotation",
 }
 
 
@@ -526,11 +536,13 @@ def available_field_types(arc_catalog_df: pd.DataFrame) -> list[str]:
 def _source_field_value(decision: MatchDecision, key: str) -> str:
     """The source-question value for one of the overridable fields."""
     source = decision.source
+    if key == "form_name":
+        return source.form_name or ""
     if key == "question":
         return (
-            decision.edited_translated_question
+            source.question
+            or decision.edited_translated_question
             or source.translated_question
-            or source.question
             or ""
         )
     if key == "options":
@@ -541,6 +553,24 @@ def _source_field_value(decision: MatchDecision, key: str) -> str:
         return source.validation or ""
     if key == "section":
         return source.section or ""
+    if key == "branching_logic":
+        return source.branching_logic or ""
+    if key == "field_note":
+        return source.field_note or ""
+    if key == "identifier":
+        return source.identifier or ""
+    if key == "required_field":
+        return source.required_field or ""
+    if key == "custom_alignment":
+        return source.custom_alignment or ""
+    if key == "question_number":
+        return source.question_number or ""
+    if key == "matrix_group":
+        return source.matrix_group or ""
+    if key == "matrix_ranking":
+        return source.matrix_ranking or ""
+    if key == "field_annotation":
+        return source.field_annotation or ""
     return ""
 
 
@@ -550,9 +580,7 @@ def _apply_field_overrides(
     """Overwrite ARC row cells with the source value for any field a
     MATCHED/MATCHED_CREATED decision picked "source" for.
 
-    Only decisions matched to exactly one ARC question carry overrides (see
-    `MatchDecision.field_overrides`) — mixing per-field against multiple ARC
-    rows isn't meaningful, so anything else is left untouched.
+    Applies the same field_overrides to ALL matched questions for a decision.
     """
     if matched_rows.empty:
         return matched_rows
@@ -562,14 +590,16 @@ def _apply_field_overrides(
         if not decision.field_overrides:
             continue
         matched = decision.matched_questions
-        if len(matched) != 1:
+        if not matched:
             continue
-        mask = df["Variable"] == matched[0].variable
-        if not mask.any():
-            continue
-        for key, column in _OVERRIDE_COLUMNS.items():
-            if decision.field_overrides.get(key) == "source":
-                df.loc[mask, column] = _source_field_value(decision, key)
+        # Apply overrides to all matched questions
+        for mq in matched:
+            mask = df["Variable"] == mq.variable
+            if not mask.any():
+                continue
+            for key, column in _OVERRIDE_COLUMNS.items():
+                if decision.field_overrides.get(key) == "source":
+                    df.loc[mask, column] = _source_field_value(decision, key)
     return df
 
 
@@ -641,18 +671,22 @@ def _translation_override_skip_sets(
     variables must be excluded from `apply_translation` — otherwise
     translating the export would silently overwrite the user's "use
     source" choice with ARC's (translated) text.
+
+    Applies to ALL matched questions for a decision.
     """
     skip_label = set()
     skip_choices = set()
     for decision in decisions:
         matched = decision.matched_questions
-        if len(matched) != 1:
+        if not matched:
             continue
-        variable = matched[0].variable
-        if decision.field_overrides.get("question") == "source":
-            skip_label.add(variable)
-        if decision.field_overrides.get("options") == "source":
-            skip_choices.add(variable)
+        # Apply to all matched questions
+        for mq in matched:
+            variable = mq.variable
+            if decision.field_overrides.get("question") == "source":
+                skip_label.add(variable)
+            if decision.field_overrides.get("options") == "source":
+                skip_choices.add(variable)
     return skip_label, skip_choices
 
 
@@ -662,37 +696,7 @@ def build_data_dictionary(
     decisions: list[MatchDecision],
     translation: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Convert matched, overridden, and newly created questions into a
-    REDCap-style data dictionary.
-
-    Parameters
-    ----------
-    matched_rows : ARC source rows (see `_SOURCE_COLUMNS`) for every
-        matched question — typically taken from the *expanded* catalog used
-        for retrieval.
-    arc_catalog : the *original*, non-expanded ARC catalog (one row per
-        `Variable`), used to look up rows for variables referenced only in
-        someone else's branching logic (see `_add_missing_branching_logic_rows`).
-    decisions : every `MatchDecision` made in the session — used to apply
-        per-field ARC-vs-source overrides to `matched_rows`, to build rows
-        for CREATED/MATCHED_CREATED questions (both are otherwise absent
-        from `matched_rows`, which only ever holds ARC catalog rows), and to
-        rename any leftover references to a renamed variable (see
-        `build_variable_rename_map`).
-    translation : an ARC-Translations `ARCH.csv` (see `translations.py`)
-        for the desired output language, or `None` to keep everything in
-        its original language. When given, every matched row's Field Label
-        / Choices are swapped for ARC's translated wording — newly created
-        questions have no ARC `Variable` to look up and are left as-is.
-
-    Mirrors `generate.py`'s `_generate_crf` + `_custom_alignment` and the
-    descriptive-label wrapping from `on_generate_click`, plus four extra
-    rules applied to the final result: no duplicate field names, forms
-    grouped into sequential blocks, every branching-logic variable present
-    as its own row, and every Branching Logic / Field Annotation / calc
-    formula updated to reference variables by their final (possibly
-    renamed) name.
-    """
+    
     matched_rows = _apply_field_overrides(matched_rows, decisions)
     matched_part = _build_core(matched_rows)
     created_part = _created_question_rows(decisions)

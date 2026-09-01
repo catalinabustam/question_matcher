@@ -11,7 +11,23 @@ from datadictionary import (
 )
 from models import MatchDecision, MatchStatus, Question
 
-_OVERRIDABLE_FIELDS = ("question", "options", "field_type", "section", "validation")
+_OVERRIDABLE_FIELDS = (
+    "form_name",
+    "question",
+    "options",
+    "field_type",
+    "section",
+    "validation",
+    "branching_logic",
+    "field_note",
+    "identifier",
+    "required_field",
+    "custom_alignment",
+    "question_number",
+    "matrix_group",
+    "matrix_ranking",
+    "field_annotation",
+)
 
 
 def _resolved_field(decision: MatchDecision, matched: Question, key: str) -> str:
@@ -20,11 +36,21 @@ def _resolved_field(decision: MatchDecision, matched: Question, key: str) -> str
     if decision.field_overrides.get(key) == "source":
         return _source_field_value(decision, key)
     arc_value = {
+        "form_name": matched.form_name,
         "question": matched.question,
         "options": matched.options,
         "field_type": matched.field_type,
         "section": matched.section,
         "validation": matched.validation,
+        "branching_logic": matched.branching_logic,
+        "field_note": matched.field_note,
+        "identifier": matched.identifier,
+        "required_field": matched.required_field,
+        "custom_alignment": matched.custom_alignment,
+        "question_number": matched.question_number,
+        "matrix_group": matched.matrix_group,
+        "matrix_ranking": matched.matrix_ranking,
+        "field_annotation": matched.field_annotation,
     }[key]
     return arc_value or ""
 
@@ -100,6 +126,7 @@ class QuestionCsvRepository:
                     rows.append(
                         {
                             "source_question_index": d.source.row_index + 1,
+                            "original_form_name": d.source.form_name or "",
                             "original_section": d.source.section,
                             "original_topic": d.source.topic or "",
                             "original_answer_type": d.source.field_type or "",
@@ -111,6 +138,7 @@ class QuestionCsvRepository:
                             "status": MatchStatus.MATCHED.value,
                             "matched_reference_id": matched.variable,
                             "matched_reference_question": matched.question,
+                            "final_form_name": resolved["form_name"],
                             "final_matched_question": resolved["question"],
                             "final_matched_options": resolved["options"],
                             "final_matched_field_type": resolved["field_type"],
@@ -119,6 +147,7 @@ class QuestionCsvRepository:
                             "options_source": d.field_overrides.get("options", "arc"),
                             "type_source": d.field_overrides.get("field_type", "arc"),
                             "section_source": d.field_overrides.get("section", "arc"),
+                            "form_name_source": d.field_overrides.get("form_name", "arc"),
                             "validation_source": d.field_overrides.get(
                                 "validation", "arc"
                             ),
@@ -145,29 +174,29 @@ class QuestionCsvRepository:
                 rows.append(
                     {
                         "source_question_index": d.source.row_index + 1,
-                        "original_section": d.source.section,
-                        "original_topic": d.source.topic or "",
-                        "original_answer_type": d.source.field_type or "",
-                        "original_question": d.source.question,
-                        "translated_question": d.source.translated_question or "",
-                        "edited_translated_question": d.edited_translated_question
-                        or "",
-                        "original_options": d.source.options,
-                        "status": MatchStatus.CREATED.value,
-                        "matched_reference_id": "",
-                        "matched_reference_question": "",
-                        "final_matched_question": "",
-                        "final_matched_options": "",
-                        "final_matched_field_type": "",
-                        "final_matched_validation": "",
-                        "question_source": "",
-                        "options_source": "",
-                        "type_source": "",
-                        "validation_source": "",
-                        "section_source": "",
-                        # Data dictionary fields for newly created questions
-                        "new_question_id": d.new_id,
-                        "new_form_name": d.new_form_name,
+                            "original_form_name": d.source.form_name or "",
+                            "original_section": d.source.section,
+                            "original_topic": d.source.topic or "",
+                            "original_answer_type": d.source.field_type or "",
+                            "original_question": d.source.question,
+                            "translated_question": d.source.translated_question or "",
+                            "edited_translated_question": d.edited_translated_question
+                            or "",
+                            "original_options": d.source.options,
+                            "status": MatchStatus.CREATED.value,
+                            "matched_reference_id": "",
+                            "matched_reference_question": "",
+                            "final_form_name": d.new_form_name,
+                            "final_matched_question": "",
+                            "final_matched_options": "",
+                            "final_matched_field_type": "",
+                            "final_matched_validation": "",
+                            "question_source": "",
+                            "options_source": "",
+                            "type_source": "",
+                            "validation_source": "",
+                            "section_source": "",
+                            "form_name_source": "",
                         "new_question_section": d.new_section,
                         "new_field_type": d.new_field_type,
                         "new_question_text": d.new_text,
