@@ -591,6 +591,7 @@ def _render_progress():
     )
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
     pending = total - matched - created - ignored
+    pending = total - resolved
 
     cols = st.columns(5)
     cols[0].metric("Total", total)
@@ -598,7 +599,7 @@ def _render_progress():
     cols[2].metric("New", created)
     cols[3].metric("Ignored", ignored)
     cols[4].metric("Pending", pending)
-    st.progress((matched + created + ignored) / total if total else 0)
+    st.progress(resolved / total if total else 0)
 
 
 def _render_question_flow():
@@ -1181,6 +1182,7 @@ def _render_question_flow():
                 ("options", "Options"),
                 ("field_type", "Type"),
                 ("validation", "Validation"),
+                ("section", "Section"),
             ]
 
             def _sync_bulk_checkbox(changed_key: str, other_key: str) -> None:
@@ -1228,7 +1230,7 @@ def _render_question_flow():
                 )
                 if remember_choice:
                     _remember_bulk_choice(idx)
-            mix_cols = st.columns(4)
+            mix_cols = st.columns(5)
             for col, (key, label) in zip(mix_cols, mix_specs):
                 if use_source:
                     default = "Use source"
@@ -1261,14 +1263,14 @@ def _render_question_flow():
             }
             st.caption(
                 f"Effective — text: {resolved['question']!r} · options: {resolved['options']!r} · "
-                f"type: {resolved['field_type']!r} · validation: {resolved['validation']!r}"
+                f"type: {resolved['field_type']!r} · section: {resolved['section']!r}"
             )
 
             mixed_match_errors, mixed_match_warnings = validate_record(
                 {
                     "variable": matched_for_mix.variable,
                     "form_name": matched_for_mix.form_name or "",
-                    "section": matched_for_mix.section or "",
+                    "section": resolved["section"],
                     "field_type": resolved["field_type"],
                     "label": resolved["question"],
                     "choices": resolved["options"],
@@ -1369,9 +1371,30 @@ def _render_export():
     st.divider()
     st.subheader("4. Export result")
     st.caption('Questions marked "ignore" are excluded from this export.')
-    df = QuestionCsvRepository.export(st.session_state.decisions)
-    st.dataframe(df, use_container_width=True, height=250)
-    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    export_df = QuestionCsvRepository.export(st.session_state.decisions)
+    display_df = export_df.copy()
+
+    st.caption("Click a row to jump back to its original source question.")
+    export_table = st.dataframe(
+        display_df,
+        use_container_width=True,
+        height=250,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    selection = getattr(export_table, "selection", None)
+    if selection is not None and getattr(selection, "rows", None):
+        target_row = selection.rows[0]
+        source_index_column = "source_question_index"
+        if source_index_column in display_df.columns:
+            target_index = int(display_df.iloc[target_row][source_index_column]) - 1
+            if 0 <= target_index < len(st.session_state.source_questions):
+                if target_index != st.session_state.current_idx:
+                    st.session_state.current_idx = target_index
+                    st.rerun()
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "⬇ Download result CSV",
         csv_bytes,
