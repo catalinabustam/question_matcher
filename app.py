@@ -11,6 +11,7 @@ Flow:
 import json
 import os
 from collections import defaultdict
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -145,6 +146,8 @@ def _existing_match_question_number(candidate, exclude_idx: int) -> int | None:
             return question_idx + 1
     return None
 
+def _get_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # --------------------------------------------------------------------------- #
 # Session state handling & Callbacks
@@ -233,6 +236,7 @@ def _reset_session():
         "arc_scope_values_Section",
         "allowed_row_indices",
         "source_filename",
+        "reorder_forms_confirm",
     ):
         st.session_state.pop(key, None)
 
@@ -1362,26 +1366,6 @@ def _render_question_flow():
         st.rerun()
 
 
-def _matched_arc_rows() -> pd.DataFrame:
-    """Original ARC catalog rows for every MATCHED decision.
-
-    Ignored and newly created questions have no corresponding ARC catalog
-    row, so they're excluded here — only matches can produce a data
-    dictionary entry (Type, Answer Options, Validation, etc. all come from
-    the matched ARC row, not from the source question).
-    """
-    arc_catalog_df = st.session_state.arc_catalog_df
-    matched_row_variable_names = []
-    for decision in st.session_state.decisions:
-        if decision.status not in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
-            continue
-        for matched in decision.matched_questions:
-            if matched.variable:
-                matched_row_variable_names.append(matched.variable)
-
-    return arc_catalog_df[arc_catalog_df["Variable"].isin(matched_row_variable_names)]
-
-
 def _render_export():
     st.divider()
     st.subheader("4. Export result")
@@ -1418,7 +1402,7 @@ def _render_export():
     st.download_button(
         "⬇ Download result CSV",
         csv_bytes,
-        file_name="matched_questions.csv",
+        file_name=f"matched_questions_{_get_timestamp()}.csv",
         mime="text/csv",
     )
 
@@ -1443,19 +1427,36 @@ def _render_export():
         else None
     )
 
-    data_dictionary_df = build_data_dictionary(
-        _matched_arc_rows(),
+    reorder_forms = st.session_state.get("reorder_forms_confirm", False)
+    data_dictionary_df, form_order_issues = build_data_dictionary(
         st.session_state.arc_catalog_df,
         st.session_state.decisions,
         translation=translation,
+        reorder_forms=reorder_forms,
     )
+
+    if form_order_issues:
+        st.error(
+            "The data dictionary can't keep the source question order — REDCap "
+            "requires each form's rows to stay together as one block:"
+        )
+        for issue in form_order_issues:
+            st.write(f"- {issue}")
+        st.checkbox(
+            "Reorder rows so each form is grouped together (recommended)",
+            key="reorder_forms_confirm",
+            help="Groups rows by form (keeping each form's own question order "
+            "intact), which resolves the issue above. Leave unchecked to fix "
+            "the source order yourself instead.",
+        )
+
     dictionary_bytes = data_dictionary_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "⬇ Download data dictionary CSV",
         dictionary_bytes,
-        file_name="datadictionary.csv",
+        file_name=f"datadictionary_{_get_timestamp()}.csv",
         mime="text/csv",
-        disabled=data_dictionary_df.empty,
+        disabled=data_dictionary_df.empty or bool(form_order_issues),
     )
 
 
@@ -1473,6 +1474,8 @@ def main():
     )
     use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang = _render_translation_form()
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     if st.session_state.get("flow_started"):
         st.sidebar.header("Save progress")
         progress_bytes = json.dumps(
@@ -1487,7 +1490,7 @@ def main():
         st.sidebar.download_button(
             "💾 Save progress",
             progress_bytes,
-            file_name="matching_progress.json",
+            file_name=f"matching_progress_{timestamp}.json",
             mime="application/json",
             help="Download your decisions so far. Resume later by "
             "re-uploading the source CSV and this file.",
