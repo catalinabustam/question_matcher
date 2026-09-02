@@ -19,7 +19,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from models import MatchDecision, MatchStatus
+from models import MatchDecision, MatchStatus, StandaloneQuestion, iter_ordered_items
 from translations import apply_translation
 
 _DESCRIPTIVE_LABEL_TEMPLATE = (
@@ -404,28 +404,83 @@ def _decision_created_frame(decision: MatchDecision, lists_path: str) -> pd.Data
     return built
 
 
+def _standalone_created_frame(
+    question: StandaloneQuestion, lists_path: str
+) -> pd.DataFrame:
+    """REDCap row for a standalone question added outside the source CSV."""
+    source_row = pd.DataFrame(
+        [
+            {
+                "Form": question.new_form_name,
+                "Section": question.new_section,
+                "Variable": question.new_id or question.st_id,
+                "Type": question.new_field_type,
+                "Question": question.new_text,
+                "Answer Options": question.new_options,
+                "Validation": question.new_validation_type,
+                "Minimum": question.new_validation_min,
+                "Maximum": question.new_validation_max,
+                "Skip Logic": question.new_branching_logic,
+            }
+        ]
+    )
+    built = _build_core(source_row, lists_path)
+    if built.empty:
+        return built
+
+    row_index = built.index[0]
+    built.loc[row_index, "Field Note"] = question.new_field_note
+    built.loc[row_index, "Identifier?"] = question.new_identifier
+    built.loc[row_index, "Required Field?"] = question.new_required_field
+    built.loc[row_index, "Field Annotation"] = question.new_field_annotation
+    built.loc[row_index, "Matrix Group Name"] = question.new_matrix_group_name
+    built.loc[row_index, "Matrix Ranking?"] = question.new_matrix_ranking
+    built.loc[row_index, "Question Number (surveys only)"] = (
+        question.new_question_number
+    )
+    if question.new_custom_alignment:
+        built.loc[row_index, "Custom Alignment"] = question.new_custom_alignment
+
+    return built
+
+
 def _ordered_dictionary_rows(
     decisions: list[MatchDecision],
     arc_catalog: pd.DataFrame,
     lists_path: str,
+    standalone_questions: list[StandaloneQuestion] | None = None,
 ) -> pd.DataFrame:
     """Every decision's row(s), concatenated in source (decision) order.
 
-    Ignored/pending decisions contribute nothing. A MATCHED_CREATED
-    decision contributes its matched row(s) immediately followed by its
-    newly-created row, keeping the two adjacent in the output.
+    Ignored/pending decisions contribute nothing. Standalone questions are
+    inserted at the position chosen by the user (`after_source_index`).
+    A MATCHED_CREATED decision contributes its matched row(s) immediately
+    followed by its newly-created row, keeping the two adjacent in the output.
     """
-    frames = [
-        frame
-        for decision in decisions
-        if decision.status
-        in (MatchStatus.MATCHED, MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
-        for frame in (
-            _decision_matched_frame(decision, arc_catalog, lists_path),
-            _decision_created_frame(decision, lists_path),
-        )
-        if not frame.empty
-    ]
+    standalone_questions = standalone_questions or []
+    frames: list[pd.DataFrame] = []
+
+    for kind, item in iter_ordered_items(decisions, standalone_questions):
+        if kind == "standalone":
+            frame = _standalone_created_frame(item, lists_path)
+        else:
+            decision = item
+            if decision.status not in (
+                MatchStatus.MATCHED,
+                MatchStatus.CREATED,
+                MatchStatus.MATCHED_CREATED,
+            ):
+                continue
+            matched_frame = _decision_matched_frame(decision, arc_catalog, lists_path)
+            created_frame = _decision_created_frame(decision, lists_path)
+            for frame in (matched_frame, created_frame):
+                if not frame.empty:
+                    frames.append(frame)
+            continue
+
+        if not frame.empty:
+            frames.append(frame)
+
     if not frames:
         return pd.DataFrame(columns=_REDCAP_COLUMNS)
     return pd.concat(frames, ignore_index=True)
@@ -676,6 +731,7 @@ def build_data_dictionary(
     translation: pd.DataFrame | None = None,
     reorder_forms: bool = False,
     lists_path: str = _DEFAULT_LISTS_PATH,
+    standalone_questions: list[StandaloneQuestion] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Build the REDCap data dictionary, in source-question order.
 
@@ -687,7 +743,9 @@ def build_data_dictionary(
       them to the user and, only if they confirm, call again with
       `reorder_forms=True` to regroup rows by form instead.
     """
-    df = _ordered_dictionary_rows(decisions, arc_catalog, lists_path)
+    df = _ordered_dictionary_rows(
+        decisions, arc_catalog, lists_path, standalone_questions
+    )
     if df.empty:
         return pd.DataFrame(columns=_REDCAP_COLUMNS), []
 

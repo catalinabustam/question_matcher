@@ -16,7 +16,7 @@ them positionally (source) and by `row_index` (matched reference rows).
 import json
 from typing import Any
 
-from models import MatchDecision, Question
+from models import MatchDecision, Question, StandaloneQuestion
 
 PROGRESS_VERSION = 1
 
@@ -26,6 +26,7 @@ def build_progress_dict(
     current_idx: int,
     reference_row_count: int,
     source_filename: str = "",
+    standalone_questions: list[StandaloneQuestion] | None = None,
 ) -> dict[str, Any]:
     """Everything needed to resume later, ready to `json.dumps`.
 
@@ -39,6 +40,9 @@ def build_progress_dict(
         "reference_row_count": reference_row_count,
         "source_filename": source_filename,
         "decisions": [d.to_dict() for d in decisions],
+        "standalone_questions": [
+            question.to_dict() for question in (standalone_questions or [])
+        ],
     }
 
 
@@ -76,8 +80,8 @@ def restore_decisions(
     progress: dict[str, Any],
     source_questions: list[Question],
     reference_questions: list[Question],
-) -> tuple[list[MatchDecision], int]:
-    """Rebuild `decisions` and `current_idx` from a loaded progress dict.
+) -> tuple[list[MatchDecision], int, list[StandaloneQuestion]]:
+    """Rebuild `decisions`, `current_idx`, and standalone questions from progress.
 
     `source_questions` / `reference_questions` must be built the same way
     they were when the file was saved (same source CSV + column mapping,
@@ -99,6 +103,11 @@ def restore_decisions(
         for data, source in zip(saved_decisions, source_questions)
     ]
 
+    standalone_questions = [
+        StandaloneQuestion.from_dict(data)
+        for data in progress.get("standalone_questions", [])
+    ]
+
     current_idx = progress.get("current_idx", 0)
     current_idx = max(0, min(current_idx, len(decisions) - 1)) if decisions else 0
-    return decisions, current_idx
+    return decisions, current_idx, standalone_questions

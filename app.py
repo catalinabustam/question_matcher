@@ -24,7 +24,7 @@ from datadictionary import (
     build_data_dictionary,
 )
 from matching_service import QuestionMatchingService, definition_with_options
-from models import MatchDecision, MatchStatus
+from models import MatchDecision, MatchStatus, StandaloneQuestion, next_standalone_st_id
 from progress_io import (
     build_progress_dict,
     load_progress_dict,
@@ -218,6 +218,7 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
   
     st.session_state.arc_catalog_df = arc_catalog_df
     st.session_state.source_filename = source_filename
+    st.session_state.standalone_questions = []
 
 
 def _reset_session():
@@ -237,6 +238,7 @@ def _reset_session():
         "allowed_row_indices",
         "source_filename",
         "reorder_forms_confirm",
+        "standalone_questions",
     ):
         st.session_state.pop(key, None)
 
@@ -257,7 +259,11 @@ def _existing_variable_ids(exclude: MatchDecision | None = None) -> set[str]:
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
         and d.new_id and d is not exclude
     }
-    return arc_ids | created_ids
+    standalone_ids = {
+        question.new_id or question.st_id
+        for question in st.session_state.get("standalone_questions", [])
+    }
+    return arc_ids | created_ids | standalone_ids
 
 def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
@@ -598,7 +604,7 @@ def _render_progress():
         1
         for d in decisions
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
-    )
+    ) + len(st.session_state.get("standalone_questions", []))
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
     resolved = sum(1 for d in decisions if d.status != MatchStatus.PENDING)
     pending = total - resolved
@@ -849,7 +855,7 @@ def _render_question_flow():
         available_sections_lower = [section.lower() for section in available_sections]
 
         if (
-            source.section != ""
+            source.section
             and source.section.lower() not in available_sections_lower
         ):
             available_sections = [source.section] + available_sections
@@ -1366,11 +1372,232 @@ def _render_question_flow():
         st.rerun()
 
 
+def _standalone_position_label(after_source_index: int, total: int) -> str:
+    if after_source_index < 0:
+        return "Before question 1"
+    if after_source_index >= total - 1:
+        return f"After question {total}"
+    return f"After question {after_source_index + 1}"
+
+
+def _render_standalone_questions():
+    """Form to add questions unrelated to any source CSV row."""
+    st.divider()
+    st.subheader("3. Add standalone question")
+    st.caption(
+        "Add a new question that does not come from the source CSV. Each one "
+        "gets an index like st_1, st_2, … and can be placed before or after "
+        "any source question."
+    )
+
+    standalone_questions: list[StandaloneQuestion] = st.session_state.get(
+        "standalone_questions", []
+    )
+    total = len(st.session_state.source_questions)
+    position_labels = ["Before question 1"] + [
+        f"After question {index + 1}" for index in range(total)
+    ]
+    position_values = [-1, *range(total)]
+
+    available_forms = sorted(
+        st.session_state.reference_df["Form"].dropna().astype(str).unique().tolist()
+    )
+    available_sections = sorted(
+        value
+        for value in st.session_state.reference_df["Section"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+        if value
+    )
+    field_type_options = available_field_types(st.session_state.reference_df)
+    next_st_id = next_standalone_st_id(standalone_questions)
+
+    with st.expander("➕ Add a standalone question", expanded=not standalone_questions):
+        position_choice = st.selectbox(
+            "Insert position",
+            options=position_labels,
+            index=len(position_labels) - 1,
+            key="standalone_position",
+            help="Where this question should appear relative to the source questions.",
+        )
+        after_source_index = position_values[position_labels.index(position_choice)]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            new_form_name = st.selectbox(
+                "Form Name *",
+                options=[""] + available_forms,
+                key="standalone_form",
+            )
+            new_section = st.selectbox(
+                "Section Header",
+                options=[""] + available_sections,
+                accept_new_options=True,
+                key="standalone_section",
+            )
+        with col2:
+            default_field_type = (
+                "text" if "text" in field_type_options else field_type_options[0]
+            )
+            new_field_type = st.selectbox(
+                "Field Type *",
+                options=field_type_options,
+                index=field_type_options.index(default_field_type),
+                key="standalone_field_type",
+            )
+            new_field_name = st.text_input(
+                "Variable / Field Name *",
+                value=next_st_id,
+                key="standalone_variable",
+                help=f"Defaults to the standalone index ({next_st_id}). Edit if needed.",
+            )
+
+        new_text = st.text_area(
+            "Field Label *",
+            key="standalone_text",
+            height=80,
+        )
+        new_options = st.text_area(
+            "Choices, Calculations, OR Slider Labels",
+            key="standalone_options",
+            height=80,
+        )
+        new_field_note = st.text_area("Field Note", key="standalone_field_note", height=60)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            new_validation_type = st.text_input(
+                "Text Validation Type OR Show Slider Number",
+                key="standalone_validation_type",
+            )
+        with col2:
+            new_validation_min = st.text_input(
+                "Text Validation Min",
+                key="standalone_validation_min",
+            )
+        with col3:
+            new_validation_max = st.text_input(
+                "Text Validation Max",
+                key="standalone_validation_max",
+            )
+
+        new_required_field = st.selectbox(
+            "Required Field?",
+            options=["", "yes", "no"],
+            key="standalone_required",
+        )
+        new_branching_logic = st.text_input(
+            "Branching Logic (Show field only if...)",
+            key="standalone_branching",
+        )
+
+        variable_name_conflict = bool(new_field_name) and new_field_name in _existing_variable_ids()
+        if variable_name_conflict:
+            st.error(
+                f"Variable name '{new_field_name}' is already in use "
+                "(ARC catalog or another created question). Choose a different name."
+            )
+
+        standalone_errors, standalone_warnings = validate_record(
+            {
+                "variable": new_field_name,
+                "form_name": new_form_name,
+                "section": new_section,
+                "field_type": new_field_type,
+                "label": new_text,
+                "choices": new_options,
+                "validation_type": new_validation_type,
+                "validation_min": new_validation_min,
+                "validation_max": new_validation_max,
+                "branching_logic": new_branching_logic,
+            },
+            existing_ids=_existing_variable_ids(),
+            available_field_types=field_type_options,
+        )
+        for err in standalone_errors:
+            if not err.startswith("Variable/Field Name"):
+                st.error(err)
+        for warn in standalone_warnings:
+            st.warning(warn)
+
+        can_add = (
+            not variable_name_conflict
+            and not standalone_errors
+            and bool(new_form_name)
+            and bool(new_field_type)
+            and bool(new_field_name)
+            and bool(new_text)
+        )
+        if st.button(
+            f"Add standalone question ({next_st_id})",
+            type="primary",
+            disabled=not can_add,
+            key="standalone_add_button",
+        ):
+            standalone_questions.append(
+                StandaloneQuestion(
+                    st_id=next_st_id,
+                    after_source_index=after_source_index,
+                    new_id=new_field_name,
+                    new_form_name=new_form_name,
+                    new_section=new_section,
+                    new_field_type=new_field_type,
+                    new_text=new_text,
+                    new_options=new_options,
+                    new_field_note=new_field_note,
+                    new_validation_type=new_validation_type,
+                    new_validation_min=new_validation_min,
+                    new_validation_max=new_validation_max,
+                    new_branching_logic=new_branching_logic,
+                    new_required_field=new_required_field,
+                )
+            )
+            st.session_state.standalone_questions = standalone_questions
+            st.rerun()
+
+    if standalone_questions:
+        summary_rows = [
+            {
+                "index": question.st_id,
+                "position": _standalone_position_label(
+                    question.after_source_index, total
+                ),
+                "variable": question.new_id or question.st_id,
+                "form": question.new_form_name,
+                "section": question.new_section,
+                "question": question.new_text,
+            }
+            for question in standalone_questions
+        ]
+        st.markdown("**Standalone questions added**")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        delete_choice = st.selectbox(
+            "Remove a standalone question",
+            options=[""] + [question.st_id for question in standalone_questions],
+            key="standalone_delete_choice",
+        )
+        if st.button("Remove selected", disabled=not delete_choice, key="standalone_delete_button"):
+            st.session_state.standalone_questions = [
+                question
+                for question in standalone_questions
+                if question.st_id != delete_choice
+            ]
+            st.rerun()
+
+
 def _render_export():
     st.divider()
     st.subheader("4. Export result")
-    st.caption('Questions marked "ignore" are excluded from this export.')
-    export_df = QuestionCsvRepository.export(st.session_state.decisions)
+    st.caption(
+        'Questions marked "ignore" are excluded from this export. Standalone '
+        "questions (st_1, st_2, …) are included at their chosen positions."
+    )
+    export_df = QuestionCsvRepository.export(
+        st.session_state.decisions,
+        st.session_state.get("standalone_questions", []),
+    )
     display_df = export_df.copy()
 
     st.caption("Click a row to jump back to its original source question.")
@@ -1392,11 +1619,15 @@ def _render_export():
         target_row = selection.rows[0]
         source_index_column = "source_question_index"
         if source_index_column in display_df.columns:
-            target_index = int(display_df.iloc[target_row][source_index_column]) - 1
-            if 0 <= target_index < len(st.session_state.source_questions):
-                if target_index != st.session_state.current_idx:
-                    st.session_state.current_idx = target_index
-                    st.rerun()
+            raw_index = display_df.iloc[target_row][source_index_column]
+            if isinstance(raw_index, str) and raw_index.startswith("st_"):
+                pass
+            else:
+                target_index = int(raw_index) - 1
+                if 0 <= target_index < len(st.session_state.source_questions):
+                    if target_index != st.session_state.current_idx:
+                        st.session_state.current_idx = target_index
+                        st.rerun()
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
@@ -1433,6 +1664,7 @@ def _render_export():
         st.session_state.decisions,
         translation=translation,
         reorder_forms=reorder_forms,
+        standalone_questions=st.session_state.get("standalone_questions", []),
     )
 
     if form_order_issues:
@@ -1484,6 +1716,7 @@ def main():
                 st.session_state.current_idx,
                 reference_row_count=len(st.session_state.reference_df),
                 source_filename=st.session_state.get("source_filename", ""),
+                standalone_questions=st.session_state.get("standalone_questions", []),
             ),
             indent=2,
         ).encode("utf-8")
@@ -1598,7 +1831,7 @@ def main():
                 if progress_file is not None:
                     try:
                         progress = load_progress_dict(progress_file.getvalue())
-                        decisions, current_idx = restore_decisions(
+                        decisions, current_idx, standalone_questions = restore_decisions(
                             progress, source_qs, reference_qs
                         )
                     except ValueError as exc:
@@ -1625,6 +1858,7 @@ def main():
                         )
                     st.session_state.decisions = decisions
                     st.session_state.current_idx = current_idx
+                    st.session_state.standalone_questions = standalone_questions
 
                 st.rerun()
         else:
@@ -1647,6 +1881,7 @@ def main():
     )
 
     _render_question_flow()
+    _render_standalone_questions()
     _render_export()
 
 

@@ -1,8 +1,10 @@
 """Domain models for questionnaire comparison."""
 
+from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 
 class MatchStatus(str, Enum):
@@ -169,3 +171,107 @@ class MatchDecision:
             setattr(decision, name, data.get(name, ""))
         decision.field_overrides = dict(data.get("field_overrides", {}))
         return decision
+
+
+# Plain string fields on `StandaloneQuestion` that round-trip through
+# `to_dict`/`from_dict` unchanged.
+_STANDALONE_STR_FIELDS = (
+    "st_id",
+    "new_id",
+    "new_form_name",
+    "new_section",
+    "new_field_type",
+    "new_text",
+    "new_options",
+    "new_field_note",
+    "new_validation_type",
+    "new_validation_min",
+    "new_validation_max",
+    "new_identifier",
+    "new_branching_logic",
+    "new_required_field",
+    "new_custom_alignment",
+    "new_field_annotation",
+    "new_matrix_group_name",
+    "new_matrix_ranking",
+    "new_question_number",
+)
+
+
+@dataclass
+class StandaloneQuestion:
+    """A new question added manually, not tied to any source CSV row.
+
+    `st_id` is a human-readable label (`st_1`, `st_2`, …) shown in the export
+    table. `after_source_index` controls placement: -1 inserts before the first
+    source question, 0 after question 1, and so on.
+    """
+
+    st_id: str
+    after_source_index: int = -1
+    new_id: str = ""
+    new_form_name: str = ""
+    new_section: str = ""
+    new_field_type: str = ""
+    new_text: str = ""
+    new_options: str = ""
+    new_field_note: str = ""
+    new_validation_type: str = ""
+    new_validation_min: str = ""
+    new_validation_max: str = ""
+    new_identifier: str = ""
+    new_branching_logic: str = ""
+    new_required_field: str = ""
+    new_custom_alignment: str = ""
+    new_field_annotation: str = ""
+    new_matrix_group_name: str = ""
+    new_matrix_ranking: str = ""
+    new_question_number: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            name: getattr(self, name) for name in _STANDALONE_STR_FIELDS
+        } | {"after_source_index": self.after_source_index}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StandaloneQuestion":
+        kwargs = {name: data.get(name, "") for name in _STANDALONE_STR_FIELDS}
+        kwargs["after_source_index"] = int(data.get("after_source_index", -1))
+        return cls(**kwargs)
+
+
+OrderedItem = tuple[
+    Literal["decision", "standalone"],
+    MatchDecision | StandaloneQuestion,
+]
+
+
+def iter_ordered_items(
+    decisions: list[MatchDecision],
+    standalone_questions: list[StandaloneQuestion],
+) -> Iterator[OrderedItem]:
+    """Yield decisions and standalone questions in export/dictionary order."""
+    by_position: dict[int, list[StandaloneQuestion]] = defaultdict(list)
+    for question in standalone_questions:
+        by_position[question.after_source_index].append(question)
+
+    for question in by_position.get(-1, []):
+        yield ("standalone", question)
+
+    for index, decision in enumerate(decisions):
+        yield ("decision", decision)
+        for question in by_position.get(index, []):
+            yield ("standalone", question)
+
+
+def next_standalone_st_id(standalone_questions: list[StandaloneQuestion]) -> str:
+    """Return the next unused `st_N` label."""
+    used = {
+        int(st_id.split("_", 1)[1])
+        for st_id in (q.st_id for q in standalone_questions)
+        if st_id.startswith("st_") and st_id.split("_", 1)[1].isdigit()
+    }
+    sequence = 1
+    while sequence in used:
+        sequence += 1
+    return f"st_{sequence}"
