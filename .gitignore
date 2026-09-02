@@ -11,3 +11,13 @@ graft/
 .DS_Store
 /index_data
 /translations_data
+/.claude
+/.cursor
+/.gemini
+/.github
+/.kiro
+.mcp.json
+/.windsurf
+AGENTS.md
+opencode.json
+GEMINI.md
