@@ -14,6 +14,7 @@ they were built when the file was saved, so decisions can be re-attached to
 them positionally (source) and by `row_index` (matched reference rows).
 """
 import json
+from dataclasses import replace
 from typing import Any
 
 from models import MatchDecision, Question, StandaloneQuestion
@@ -40,6 +41,22 @@ def build_progress_dict(
         "reference_row_count": reference_row_count,
         "source_filename": source_filename,
         "decisions": [d.to_dict() for d in decisions],
+        # One entry per decision (same order/count), capturing the
+        # *auto*-translated fields on `decision.source` — not the user's
+        # manual `edited_translated_question`/`edited_translated_definition`,
+        # which already round-trip through `MatchDecision.to_dict`. Saving
+        # these lets `apply_saved_translations` restore them onto a freshly
+        # re-uploaded source CSV at resume time instead of calling the
+        # translator again.
+        "source_translations": [
+            {
+                "translated_question": d.source.translated_question or "",
+                "translated_definition": d.source.translated_definition or "",
+                "translated_section": d.source.translated_section or "",
+                "translated_options": d.source.translated_options or "",
+            }
+            for d in decisions
+        ],
         "standalone_questions": [
             question.to_dict() for question in (standalone_questions or [])
         ],
@@ -74,6 +91,40 @@ def load_progress_dict(raw: bytes) -> dict[str, Any]:
             "This progress file was made by an incompatible app version."
         )
     return data
+
+
+def apply_saved_translations(
+    progress: dict[str, Any], source_questions: list[Question]
+) -> tuple[list[Question], bool]:
+    """Re-apply auto-translations saved by `build_progress_dict` onto a
+    freshly re-uploaded source CSV, so resuming never re-runs the translator.
+
+    `Question` is frozen, so each translated question is rebuilt via
+    `dataclasses.replace` rather than mutated in place.
+
+    Returns `(questions, restored)`. `restored` is only True when the saved
+    translations line up 1:1 with `source_questions` (same count and order)
+    — the same requirement `restore_decisions` has for re-attaching
+    decisions positionally. On any mismatch (old progress file with no
+    `source_translations`, or a different source CSV), the original
+    `source_questions` are returned unchanged and the caller should fall
+    back to translating normally if translation was requested.
+    """
+    saved = progress.get("source_translations", [])
+    if not saved or len(saved) != len(source_questions):
+        return source_questions, False
+
+    translated = [
+        replace(
+            question,
+            translated_question=data.get("translated_question", ""),
+            translated_definition=data.get("translated_definition", ""),
+            translated_section=data.get("translated_section", ""),
+            translated_options=data.get("translated_options", ""),
+        )
+        for question, data in zip(source_questions, saved)
+    ]
+    return translated, True
 
 
 def restore_decisions(
