@@ -26,6 +26,7 @@ from datadictionary import (
 from matching_service import QuestionMatchingService, definition_with_options
 from models import MatchDecision, MatchStatus, StandaloneQuestion, next_standalone_st_id
 from progress_io import (
+    apply_saved_translations,
     build_progress_dict,
     load_progress_dict,
     peek_source_filename,
@@ -1414,7 +1415,7 @@ def _render_standalone_questions():
     field_type_options = available_field_types(st.session_state.reference_df)
     next_st_id = next_standalone_st_id(standalone_questions)
 
-    with st.expander("➕ Add a standalone question", expanded=not standalone_questions):
+    with st.expander("➕ Add a standalone question", expanded=False):
         position_choice = st.selectbox(
             "Insert position",
             options=position_labels,
@@ -1786,7 +1787,25 @@ def main():
                 # dataframe for `reference[i]` to correspond to doc id `ids[i]`.
                 reference_qs = QuestionCsvRepository.load(df_expanded, results_r)
 
-                if use_translation:
+                # Parsed once here (instead of again further down) so a
+                # progress file's saved translations can be restored onto
+                # `source_qs` before the translation step below runs.
+                progress = None
+                if progress_file is not None:
+                    try:
+                        progress = load_progress_dict(progress_file.getvalue())
+                    except ValueError as exc:
+                        st.error(f"Could not resume progress: {exc}")
+                        _reset_session()
+                        return
+
+                restored_translations = False
+                if progress is not None:
+                    source_qs, restored_translations = apply_saved_translations(
+                        progress, source_qs
+                    )
+
+                if use_translation and not restored_translations:
                     if translator_type == "DeepL" and not api_key:
                         st.error(
                             "A DeepL API key is required — set DEEPL_API_KEY "
@@ -1828,9 +1847,8 @@ def main():
                     source_filename=source_file.name,
                 )
 
-                if progress_file is not None:
+                if progress is not None:
                     try:
-                        progress = load_progress_dict(progress_file.getvalue())
                         decisions, current_idx, standalone_questions = restore_decisions(
                             progress, source_qs, reference_qs
                         )
@@ -1877,7 +1895,7 @@ def main():
         st.session_state.reference_df, st.session_state.get("scope_filters")
     )
     st.session_state.allowed_row_indices = _allowed_row_indices(
-        st.session_state.arc_catalog_df, filters
+        st.session_state.reference_df, filters
     )
 
     _render_question_flow()
