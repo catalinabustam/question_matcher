@@ -26,7 +26,6 @@ from datadictionary import (
 from matching_service import QuestionMatchingService, definition_with_options
 from models import MatchDecision, MatchStatus, StandaloneQuestion, next_standalone_st_id
 from progress_io import (
-    apply_saved_translations,
     build_progress_dict,
     load_progress_dict,
     peek_source_filename,
@@ -905,7 +904,7 @@ def _render_question_flow():
                 if default_selected_form
                 else 0,
                 key=f"form_{idx}",
-                help="Select the form this question belongs to",
+                help="Select the form this question belongs to, or type to create a new one",
             )
         with col2:
             preferred_field_type = decision.new_field_type or preview["new_field_type"]
@@ -1430,6 +1429,7 @@ def _render_standalone_questions():
             new_form_name = st.selectbox(
                 "Form Name *",
                 options=[""] + available_forms,
+                accept_new_options=True,
                 key="standalone_form",
             )
             new_section = st.selectbox(
@@ -1659,6 +1659,18 @@ def _render_export():
         else None
     )
 
+    order_mode = st.radio(
+        "Row order",
+        ["Source question order", "Strict ARC catalog order"],
+        key="dictionary_order_mode",
+        horizontal=True,
+        help="'Source question order' keeps the order questions appear in "
+        "your source CSV. 'Strict ARC catalog order' instead lays rows out "
+        "exactly as they appear in the ARC catalog file; new questions are "
+        "placed next to their saved Form Name and Section Header.",
+    )
+    arc_order = order_mode == "Strict ARC catalog order"
+
     reorder_forms = st.session_state.get("reorder_forms_confirm", False)
     data_dictionary_df, form_order_issues = build_data_dictionary(
         st.session_state.arc_catalog_df,
@@ -1666,6 +1678,7 @@ def _render_export():
         translation=translation,
         reorder_forms=reorder_forms,
         standalone_questions=st.session_state.get("standalone_questions", []),
+        arc_order=arc_order,
     )
 
     if form_order_issues:
@@ -1892,10 +1905,10 @@ def main():
     _render_progress()
 
     filters = _render_candidate_filter(
-        st.session_state.reference_df, st.session_state.get("scope_filters")
+        st.session_state.arc_catalog_df, st.session_state.get("scope_filters")
     )
     st.session_state.allowed_row_indices = _allowed_row_indices(
-        st.session_state.reference_df, filters
+        st.session_state.arc_catalog_df, filters
     )
 
     _render_question_flow()
