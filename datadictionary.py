@@ -15,6 +15,7 @@ Input rows must come from the ARC catalog (same columns as `ARC.csv`:
 
 import os
 import re
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -593,6 +594,149 @@ def _reorder_forms_sequential(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _arc_catalog_order_map(arc_catalog: pd.DataFrame) -> dict[str, int]:
+    """Map each ARC `Variable` to its row position in the original ARC
+    catalog (first occurrence), defining the "strict ARC order" that
+    `_reorder_by_arc_catalog` sorts matched rows by.
+    """
+    if arc_catalog.empty or "Variable" not in arc_catalog.columns:
+        return {}
+    variables = arc_catalog["Variable"].dropna().astype(str)
+    order: dict[str, int] = {}
+    for position, variable in enumerate(variables):
+        order.setdefault(variable, position)
+    return order
+
+
+def _reorder_by_arc_catalog(df: pd.DataFrame, arc_catalog: pd.DataFrame) -> pd.DataFrame:
+    """Reorder `df` so every row matched to an ARC catalog question follows
+    the exact order of the original ARC catalog file.
+
+    Rows whose variable isn't in ARC (newly created / standalone questions)
+    are slotted in right after the last ARC row sharing their Form Name and
+    Section Header, falling back to the last ARC row sharing just their
+    Form Name, and finally grouped at the very end (one contiguous block
+    per form, in first-appearance order) if their Form Name isn't in ARC
+    at all. This keeps every form contiguous, satisfying REDCap's
+    requirement, since the ARC catalog is itself grouped by form.
+    """
+    order_map = _arc_catalog_order_map(arc_catalog)
+    arc_mask = df[_FIELDNAME_COLUMN].isin(order_map)
+
+    arc_rows = df[arc_mask].copy()
+    arc_rows["_order"] = arc_rows[_FIELDNAME_COLUMN].map(order_map)
+    arc_rows = (
+        arc_rows.sort_values("_order", kind="stable")
+        .drop(columns="_order")
+        .reset_index(drop=True)
+    )
+
+    new_rows = df[~arc_mask]
+    if new_rows.empty:
+        return arc_rows
+
+    # For each (form, section) / form seen among the ARC rows, remember the
+    # last positional index in `arc_rows` where it appears — that's where a
+    # new row anchored to it gets inserted right after.
+    last_index_for_form_section: dict[tuple[str, str], int] = {}
+    last_index_for_form: dict[str, int] = {}
+    for position, row in arc_rows.iterrows():
+        form, section = row[_FORM_COLUMN], row[_SECTION_COLUMN]
+        last_index_for_form_section[(form, section)] = position
+        last_index_for_form[form] = position
+
+    inserts_after: dict[int, list[pd.Series]] = defaultdict(list)
+    unanchored: list[pd.Series] = []
+    for _, row in new_rows.iterrows():
+        form, section = row[_FORM_COLUMN], row[_SECTION_COLUMN]
+        anchor = last_index_for_form_section.get((form, section))
+        if anchor is None:
+            anchor = last_index_for_form.get(form)
+        if anchor is None:
+            unanchored.append(row)
+        else:
+            inserts_after[anchor].append(row)
+
+    output_rows: list[pd.Series] = []
+    for position, row in arc_rows.iterrows():
+        output_rows.append(row)
+        output_rows.extend(inserts_after.get(position, []))
+
+    if unanchored:
+        # None of these rows' forms exist in ARC at all — group them by
+        # form (first-appearance order) so each still forms one contiguous
+        # block, then append that block at the very end.
+        tail = _reorder_forms_sequential(pd.DataFrame(unanchored).reset_index(drop=True))
+        output_rows.extend(row for _, row in tail.iterrows())
+
+    return pd.DataFrame(output_rows).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Branching-logic dependency ordering
+# --------------------------------------------------------------------------- #
+
+
+def _dependency_graph(df: pd.DataFrame) -> dict[str, set[str]]:
+    """Map each row's Variable / Field Name to the *other* row variables it
+    references (via branching logic, calc choices, or field annotation)
+    that must therefore end up placed before it.
+
+    Only references to variables that actually have a row in `df` count —
+    a dangling reference (already reported elsewhere, or left as-is by
+    design) has nothing to order against.
+    """
+    known_variables = set(df[_FIELDNAME_COLUMN])
+    dependencies: dict[str, set[str]] = {}
+    for _, row in df.iterrows():
+        variable = row[_FIELDNAME_COLUMN]
+        referenced = _row_references(row) & known_variables
+        referenced.discard(variable)
+        dependencies[variable] = referenced
+    return dependencies
+
+
+def _ensure_dependency_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Reorder rows, minimally, so every variable referenced in a row's
+    branching logic / calc / annotation appears in an earlier row than the
+    row that references it — regardless of which ordering mode (source
+    order or strict ARC order) produced `df`.
+
+    Uses a stable, layer-by-layer topological sort (Kahn's algorithm):
+    rows with no outstanding dependencies are placed first, in their
+    existing relative order; once placed, they unblock the rows that
+    depended on them, and so on. A reference cycle — which shouldn't occur
+    in valid branching logic, but would otherwise loop forever — is broken
+    by placing any rows still stuck once a pass makes no progress in their
+    original relative order.
+    """
+    if df.empty:
+        return df
+
+    dependencies = _dependency_graph(df)
+    rows_by_variable = {row[_FIELDNAME_COLUMN]: row for _, row in df.iterrows()}
+
+    placed: list[str] = []
+    placed_set: set[str] = set()
+    pending = list(df[_FIELDNAME_COLUMN])
+
+    while pending:
+        ready, still_pending = [], []
+        for variable in pending:
+            (ready if dependencies[variable] <= placed_set else still_pending).append(
+                variable
+            )
+        if not ready:
+            # Cycle or unsatisfiable dependency — stop looping and place
+            # what's left in its original order.
+            ready, still_pending = still_pending, []
+        placed.extend(ready)
+        placed_set.update(ready)
+        pending = still_pending
+
+    return pd.DataFrame([rows_by_variable[v] for v in placed]).reset_index(drop=True)
+
+
 def _dedupe_section_headers(df: pd.DataFrame) -> pd.DataFrame:
     """Blank out a Section Header everywhere except the first row it appears on.
 
@@ -732,6 +876,7 @@ def build_data_dictionary(
     reorder_forms: bool = False,
     lists_path: str = _DEFAULT_LISTS_PATH,
     standalone_questions: list[StandaloneQuestion] | None = None,
+    arc_order: bool = False,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Build the REDCap data dictionary, in source-question order.
 
@@ -742,6 +887,17 @@ def build_data_dictionary(
       Non-empty issues mean `dictionary_df` is NOT REDCap-valid yet — show
       them to the user and, only if they confirm, call again with
       `reorder_forms=True` to regroup rows by form instead.
+
+    If `arc_order` is True, rows are instead laid out in the exact order
+    of the original ARC catalog (see `_reorder_by_arc_catalog`); newly
+    created / standalone questions are anchored next to their saved Form
+    Name and Section Header. This mode is always REDCap-valid, so
+    `reorder_forms` is ignored and `form_order_issues` is always empty.
+
+    Either way, a final pass (`_ensure_dependency_order`) guarantees any
+    variable named in a row's branching logic, calc, or annotation ends up
+    placed before that row — this can itself shift rows around, so
+    `form_order_issues` is (re-)detected after it, not before.
     """
     df = _ordered_dictionary_rows(
         decisions, arc_catalog, lists_path, standalone_questions
@@ -752,13 +908,16 @@ def build_data_dictionary(
     df = _insert_missing_branching_logic_rows(df, arc_catalog, lists_path)
     df = _drop_duplicate_fieldnames(df)
 
-    issues = _detect_form_order_issues(df)
-    if reorder_forms and issues:
+    if arc_order:
+        df = _reorder_by_arc_catalog(df, arc_catalog)
+    elif reorder_forms and _detect_form_order_issues(df):
         df = _reorder_forms_sequential(df)
-        issues = []
 
     rename_map = build_variable_rename_map(decisions)
     df = _apply_variable_renames(df, rename_map)
+    df = _ensure_dependency_order(df)
+
+    issues = [] if arc_order else _detect_form_order_issues(df)
 
     if translation is not None:
         skip_label, skip_choices = _translation_override_skip_sets(decisions)
