@@ -12,11 +12,12 @@ import json
 import os
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
+from arc_hybrid_search import HybridSearchIndex, build_index
 import pandas as pd
 import streamlit as st
 
-from bm25 import load_bm25_retriever
 from csv_io import QuestionCsvRepository
 from datadictionary import (
     _source_field_value,
@@ -36,13 +37,7 @@ from rules import build_new_question, build_variable_name
 from translate import deepl_translator, ollama_translator
 from translations import available_languages, load_translation
 from dotenv import load_dotenv
-from vector_db import (
-    EMBEDDING_MODEL,
-    INDEX_DATA_DIR,
-    build_documents,
-    build_ids,
-    load_chromadb_collections,
-)
+INDEX_DATA_DIR = Path("arc_data")
 
 AUTO_DETECT = "Auto-detect"
 DEEPL_LANGUAGES = ["ES", "EN-US", "EN-GB", "PT-BR", "PT-PT", "FR", "DE", "IT", "CA"]
@@ -68,24 +63,43 @@ load_dotenv(override=True)
 
 @st.cache_resource(show_spinner="Loading the reference catalog and search index...")
 def _load_index():
-    """Load the ARC index built ahead of time by `build_index.py`.
-    """
-    if not (INDEX_DATA_DIR / "arc_expanded.csv").exists():
+    """Load the ARC index built by the sidebar index control."""
+    raw_path = INDEX_DATA_DIR / "raw" / "arc_raw.csv"
+    expanded_path = INDEX_DATA_DIR / "expanded" / "arc_expanded.csv"
+    if not raw_path.exists() or not expanded_path.exists():
         raise RuntimeError(
-            "No reference index found. Build it first by running: python build_index.py"
+            "No reference index found. Click 'Create ARC index' in the sidebar first."
         )
 
-    reference_df = pd.read_csv(INDEX_DATA_DIR / "arc_raw.csv", dtype=str).fillna("")
-    df_expanded = pd.read_csv(INDEX_DATA_DIR / "arc_expanded.csv", dtype=str).fillna("")
+    reference_df = pd.read_csv(raw_path, dtype=str).fillna("")
+    df_expanded = pd.read_csv(expanded_path, dtype=str).fillna("")
+    hybrid_index = HybridSearchIndex(data_dir=INDEX_DATA_DIR)
 
-    documents = build_documents(df_expanded)
-    ids = build_ids(df_expanded)
+    return reference_df, df_expanded, hybrid_index
 
-    collection_questions, collection_ques_def = load_chromadb_collections(EMBEDDING_MODEL)
-    bm25_retriever, stemmer = load_bm25_retriever()
 
-    return (reference_df, df_expanded, collection_questions, collection_ques_def,
-            documents, ids, bm25_retriever, stemmer)
+def _render_index_controls() -> None:
+    """Render the create/recreate control for the local ARC index."""
+    index_exists = INDEX_DATA_DIR.exists()
+    button_label = "Recreate ARC index" if index_exists else "Create ARC index"
+    button_type = "secondary" if index_exists else "primary"
+
+    if st.sidebar.button(
+        button_label,
+        type=button_type,
+        use_container_width=True,
+        disabled=st.session_state.get("flow_started", False),
+    ):
+        try:
+            with st.spinner(
+                "Recreating ARC index..." if index_exists else "Creating ARC index..."
+            ):
+                build_index(data_dir="./arc_data")
+            _load_index.clear()
+            st.sidebar.success("ARC index is ready.")
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(f"Could not build ARC index: {exc}")
 
 
 @st.cache_data(show_spinner=False)
@@ -531,19 +545,33 @@ def _render_candidate_filter(reference_df: pd.DataFrame,
     return filters
 
 
-def _allowed_row_indices(reference_df: pd.DataFrame, filters: dict):
-    """Turn {column: [values]} into a set of matching row_index values, or
-    None if no filter is active (i.e. don't restrict candidates at all).
-    Columns are AND-combined; values within a column are OR-combined.
+def _allowed_row_indices(
+    reference_df: pd.DataFrame,
+    filters: dict,
+    expanded_df: pd.DataFrame | None = None,
+):
+    """Return expanded-catalog row indices matching filters from the raw catalog.
+
+    Filters are selected from the raw ARC catalog, while retrieval returns rows
+    from the expanded catalog. Matching by ``Variable`` preserves that link
+    when one raw question expands into multiple candidate rows.
     """
     if not filters:
         return None
     mask = pd.Series(True, index=reference_df.index)
     for col, values in filters.items():
         mask &= reference_df[col].astype(str).isin(values)
-    matched = set(reference_df.index[mask])
+    matched_raw = reference_df.loc[mask]
+    if expanded_df is None:
+        matched = set(matched_raw.index)
+    else:
+        variables = set(matched_raw["Variable"].astype(str))
+        matched = set(
+            expanded_df.index[expanded_df["Variable"].astype(str).isin(variables)]
+        )
     st.sidebar.caption(
-        f"{len(matched)} / {len(reference_df)} reference rows match the filter."
+        f"{len(matched)} / {len(expanded_df) if expanded_df is not None else len(reference_df)} "
+        "reference rows match the filter."
     )
     return matched
 
@@ -629,9 +657,11 @@ def _render_question_flow():
         st.markdown(
             f"**Original question:** {source.question}"
             f"  ·  **Original definition:** {source.definition or '—'}"
+            f"  ·  **Variable:** {source.variable or '—'}"
         )
         st.markdown(
             f"**Section:** {source.section or '—'}"
+            f"**Form:** {source.form_name or '—'}"
             f"  ·  **Answer type:** {source.field_type or '—'}"
         )
         if source.options:
@@ -1719,6 +1749,7 @@ def main():
         source_filename=source_file.name if source_file else ""
     )
     use_translation, translator_type, api_key, ollama_model, ollama_base_url, source_lang = _render_translation_form()
+    _render_index_controls()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1753,12 +1784,7 @@ def main():
                 (
                     reference_df,
                     df_expanded,
-                    collection_questions,
-                    collection_ques_def,
-                    documents,
-                    ids,
-                    bm25_retriever,
-                    stemmer,
+                    hybrid_index,
                 ) = _load_index()
             except RuntimeError as exc:
                 st.error(str(exc))
@@ -1775,29 +1801,17 @@ def main():
                 results_r = _render_mapping(reference_df, "ARC", is_source=False)
 
             scope_filters = _render_search_scope(reference_df)
-            allowed_row_indices = _allowed_row_indices(df_expanded, scope_filters)
-            filter_clauses = [
-                {col: {"$in": values}} for col, values in scope_filters.items()
-            ]
-            metadata_filters = (
-                filter_clauses[0]
-                if len(filter_clauses) == 1
-                else {"$and": filter_clauses}
-                if filter_clauses
-                else None
+            allowed_row_indices = _allowed_row_indices(
+                reference_df, scope_filters, expanded_df=df_expanded
             )
-
             if st.button(
                 "🔄 Resume from saved progress" if progress_file else "Start comparison",
                 type="primary",
                 disabled=not results_s["question"],
             ):
                 source_qs = QuestionCsvRepository.load(source_df, results_s)
-                # IMPORTANT: loaded from `df_expanded`, not `reference_df`. The
-                # ChromaDB collections and the BM25 index above were built over
-                # the expanded catalog (one row per user-list item), so the
-                # reference Question at position i must come from that same
-                # dataframe for `reference[i]` to correspond to doc id `ids[i]`.
+                # The package's expanded catalog is one row per user-list item,
+                # so row positions must stay aligned with retrieval results.
                 reference_qs = QuestionCsvRepository.load(df_expanded, results_r)
 
                 # Parsed once here (instead of again further down) so a
@@ -1844,15 +1858,9 @@ def main():
 
                 matcher = QuestionMatchingService(
                     reference=reference_qs,
-                    collection_questions=collection_questions,
-                    collection_ques_def=collection_ques_def,
-                    documents=documents,
-                    ids=ids,
-                    bm25_retriever=bm25_retriever,
-                    stemmer=stemmer,
-                    arc_pd=reference_df,
+                    hybrid_index=hybrid_index,
                     allowed_row_indices=allowed_row_indices,
-                    metadata_filters=metadata_filters,
+                    metadata_filter=scope_filters,
                 )
 
                 _init_session(
@@ -1908,7 +1916,9 @@ def main():
         st.session_state.arc_catalog_df, st.session_state.get("scope_filters")
     )
     st.session_state.allowed_row_indices = _allowed_row_indices(
-        st.session_state.arc_catalog_df, filters
+        st.session_state.arc_catalog_df,
+        filters,
+        expanded_df=st.session_state.reference_df,
     )
 
     _render_question_flow()
