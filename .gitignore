@@ -1,15 +1,8 @@
-ARC_Lists/
-arc_index_bm25/
-chromadb_data/
-graf/
 .env
 .vscode/
 __pycache__/
-
-# graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
 .DS_Store
-/index_data
 /translations_data
 /.claude
 /.cursor
@@ -21,3 +14,4 @@ graft/
 AGENTS.md
 opencode.json
 GEMINI.md
+/arc_data
