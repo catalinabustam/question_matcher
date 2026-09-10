@@ -25,12 +25,19 @@ from datadictionary import (
     build_data_dictionary,
 )
 from matching_service import QuestionMatchingService, definition_with_options
-from models import MatchDecision, MatchStatus, StandaloneQuestion, next_standalone_st_id
+from models import (
+    MatchDecision,
+    MatchStatus,
+    Question,
+    StandaloneQuestion,
+    next_standalone_st_id,
+)
 from progress_io import (
     build_progress_dict,
     load_progress_dict,
     peek_source_filename,
     restore_decisions,
+    apply_saved_translations,
 )
 from redcap_validation import validate_record
 from rules import build_new_question, build_variable_name
@@ -219,8 +226,26 @@ def _deselect_all_candidates(idx: int, num_candidates: int):
         st.session_state[f"candidate_{idx}_{i}"] = False
 
 
+def _navigable_index(current: int, direction: int, skip_matched: bool) -> int | None:
+    """Next question index stepping by `direction` (+1 or -1) from `current`.
+
+    When `skip_matched` is set, MATCHED decisions are stepped over so
+    Previous/Next only stop on questions still needing review. Returns
+    None if there's nowhere left to go in that direction.
+    """
+    decisions = st.session_state.decisions
+    total = len(decisions)
+    idx = current + direction
+    while 0 <= idx < total:
+        if not skip_matched or decisions[idx].status != MatchStatus.MATCHED:
+            return idx
+        idx += direction
+    return None
+
+
 def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.DataFrame,
-                   arc_catalog_df: pd.DataFrame, scope_filters: dict, source_filename: str = ""):
+                   arc_catalog_df: pd.DataFrame, scope_filters: dict, reference_qs=None,
+                   source_filename: str = ""):
     st.session_state.source_questions = source_qs
     st.session_state.decisions = [MatchDecision(source=q) for q in source_qs]
     st.session_state.matcher = matcher
@@ -233,6 +258,11 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     st.session_state.arc_catalog_df = arc_catalog_df
     st.session_state.source_filename = source_filename
     st.session_state.standalone_questions = []
+    # Lookup used by `_apply_exact_variable_autoskip` to auto-match a source
+    # question straight to the reference row with the same variable name.
+    st.session_state.reference_by_variable = {
+        q.variable: q for q in (reference_qs or []) if q.variable
+    }
 
 
 def _reset_session():
@@ -253,6 +283,9 @@ def _reset_session():
         "source_filename",
         "reorder_forms_confirm",
         "standalone_questions",
+        "reference_by_variable",
+        "auto_match_exact_variables",
+        "skip_matched_in_nav",
     ):
         st.session_state.pop(key, None)
 
@@ -278,6 +311,54 @@ def _existing_variable_ids(exclude: MatchDecision | None = None) -> set[str]:
         for question in st.session_state.get("standalone_questions", [])
     }
     return arc_ids | created_ids | standalone_ids
+
+
+def _pending_exact_variable_matches() -> dict[int, Question]:
+    """Map each PENDING decision's index to the ARC reference question it
+    would be matched to via an exact variable-name match — without
+    actually applying anything.
+
+    Used both to actually apply the match (`_apply_exact_variable_autoskip`,
+    only called while the sidebar toggle is on) and to report an accurate
+    "Matched" count in `_render_progress` regardless of whether that toggle
+    is on. A reference variable already claimed by another decision is
+    excluded, mirroring the duplicate-match guard in the manual candidate
+    flow (`_existing_match_question_number`).
+    """
+    reference_by_variable = st.session_state.get("reference_by_variable", {})
+    if not reference_by_variable:
+        return {}
+
+    used_variables = {
+        matched.variable
+        for decision in st.session_state.decisions
+        for matched in decision.matched_questions
+    }
+    available = {}
+    for index, decision in enumerate(st.session_state.decisions):
+        if decision.status != MatchStatus.PENDING or not decision.source.variable:
+            continue
+        matched = reference_by_variable.get(decision.source.variable)
+        if matched is None or matched.variable in used_variables:
+            continue
+        available[index] = matched
+        used_variables.add(matched.variable)
+    return available
+
+
+def _apply_exact_variable_autoskip() -> None:
+    """Mark every PENDING decision with an exact ARC variable-name match
+    (see `_pending_exact_variable_matches`) as MATCHED, without manual
+    review. Safe to call on every rerun while the sidebar toggle is on —
+    it only ever touches decisions still PENDING."""
+    decisions = st.session_state.decisions
+    for index, matched in _pending_exact_variable_matches().items():
+        decision = decisions[index]
+        decision.status = MatchStatus.MATCHED
+        decision.matched = matched
+        decision.matches = [matched]
+        decision.field_overrides = {}
+
 
 def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
@@ -545,6 +626,21 @@ def _render_candidate_filter(reference_df: pd.DataFrame,
     return filters
 
 
+def _render_auto_match_toggle() -> bool:
+    """Sidebar toggle: auto-mark pending questions as matched when their
+    variable name exactly matches an ARC catalog variable. Can be switched
+    on or off at any point during the session (see `main`)."""
+    st.sidebar.header("6. Auto-match exact ARC variables")
+    st.sidebar.caption(
+        "Automatically mark pending questions as matched to the ARC row "
+        "with the same variable name, skipping manual candidate review for "
+        "them. Already-decided questions are left untouched."
+    )
+    return st.sidebar.checkbox(
+        "Auto-match exact variable names", key="auto_match_exact_variables"
+    )
+
+
 def _allowed_row_indices(
     reference_df: pd.DataFrame,
     filters: dict,
@@ -623,23 +719,34 @@ def _render_mapping(df: pd.DataFrame, prefix: str, is_source: bool = True):
 def _render_progress():
     decisions = st.session_state.decisions
     total = len(decisions)
+    pending_exact_matches = len(_pending_exact_variable_matches())
     matched = sum(
         1
         for d in decisions
         if d.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED)
-    )
+    ) + pending_exact_matches
     created = sum(
         1
         for d in decisions
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
     ) + len(st.session_state.get("standalone_questions", []))
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
-    resolved = sum(1 for d in decisions if d.status != MatchStatus.PENDING)
-    pending = total - resolved
+    # True pending (still PENDING status) minus the ones already counted
+    # under "Matched" above, so the metrics add up to `total`.
+    pending = (
+        sum(1 for d in decisions if d.status == MatchStatus.PENDING)
+        - pending_exact_matches
+    )
+    resolved = total - pending
 
     cols = st.columns(5)
     cols[0].metric("Total", total)
-    cols[1].metric("Matched", matched)
+    cols[1].metric(
+        "Matched",
+        matched,
+        help="Includes questions with an exact ARC variable-name match, "
+        "even if 'Auto-match exact ARC variables' hasn't been turned on yet.",
+    )
     cols[2].metric("New", created)
     cols[3].metric("Ignored", ignored)
     cols[4].metric("Pending", pending)
@@ -651,6 +758,14 @@ def _render_question_flow():
     total = len(st.session_state.source_questions)
     source = st.session_state.source_questions[idx]
     decision = st.session_state.decisions[idx]
+
+    st.checkbox(
+        "Skip already-matched questions when navigating with Previous/Next",
+        key="skip_matched_in_nav",
+        help="When checked, Previous/Next jump over questions already "
+        "marked as matched, so you only step through questions still "
+        "needing review.",
+    )
 
     st.markdown(f"**Question {idx + 1} of {total}**")
     with st.container(border=True):
@@ -1386,19 +1501,23 @@ def _render_question_flow():
                 field_overrides=field_overrides,
             )
 
+    skip_matched_nav = st.session_state.get("skip_matched_in_nav", False)
+    prev_target = _navigable_index(idx, -1, skip_matched_nav)
+    next_target = _navigable_index(idx, 1, skip_matched_nav)
+
     nav_cols = st.columns([1, 1, 1, 5])
-    if nav_cols[0].button("⬅ Previous", disabled=idx == 0):
+    if nav_cols[0].button("⬅ Previous", disabled=prev_target is None):
         save_current_decision()
-        st.session_state.current_idx = max(0, idx - 1)
+        st.session_state.current_idx = prev_target
         st.rerun()
     if nav_cols[1].button("Save and continue ➡", type="primary", disabled=not can_save):
         save_current_decision()
-        if idx < total - 1:
-            st.session_state.current_idx = idx + 1
+        if next_target is not None:
+            st.session_state.current_idx = next_target
         st.rerun()
-    if nav_cols[2].button("Next ➡", disabled=idx == total - 1):
+    if nav_cols[2].button("Next ➡", disabled=next_target is None):
         save_current_decision()
-        st.session_state.current_idx = min(total - 1, idx + 1)
+        st.session_state.current_idx = next_target
         st.rerun()
 
 
@@ -1865,7 +1984,7 @@ def main():
 
                 _init_session(
                     source_qs, matcher, df_expanded, reference_df, scope_filters,
-                    source_filename=source_file.name,
+                    reference_qs=reference_qs, source_filename=source_file.name,
                 )
 
                 if progress is not None:
@@ -1920,6 +2039,9 @@ def main():
         filters,
         expanded_df=st.session_state.reference_df,
     )
+
+    if _render_auto_match_toggle():
+        _apply_exact_variable_autoskip()
 
     _render_question_flow()
     _render_standalone_questions()
