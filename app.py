@@ -282,7 +282,6 @@ def _reset_session():
         "arc_scope_values_Section",
         "allowed_row_indices",
         "source_filename",
-        "reorder_forms_confirm",
         "standalone_questions",
         "last_registered_section_header",
         "reference_by_variable",
@@ -1341,6 +1340,7 @@ def _render_question_flow():
             },
             existing_ids=_existing_variable_ids(exclude=decision),
             available_field_types=field_type_options,
+            require_form_and_section=True,
         )
         # The variable-name conflict/format problem already gets its own
         # inline st.error above — skip it here to avoid showing it twice.
@@ -1709,7 +1709,7 @@ def _render_standalone_questions():
                 key="standalone_form",
             )
             new_section = st.selectbox(
-                "Section Header",
+                "Section Header *",
                 options=[""] + available_sections,
                 accept_new_options=True,
                 key="standalone_section",
@@ -1796,6 +1796,7 @@ def _render_standalone_questions():
             },
             existing_ids=_existing_variable_ids(),
             available_field_types=field_type_options,
+            require_form_and_section=True,
         )
         for err in standalone_errors:
             if not err.startswith("Variable/Field Name"):
@@ -1807,6 +1808,7 @@ def _render_standalone_questions():
             not variable_name_conflict
             and not standalone_errors
             and bool(new_form_name)
+            and bool(new_section)
             and bool(new_field_type)
             and bool(new_field_name)
             and bool(new_text)
@@ -1943,42 +1945,20 @@ def _render_export():
         else None
     )
 
-    order_mode = st.radio(
-        "Row order",
-        ["Source question order", "Strict ARC catalog order"],
-        key="dictionary_order_mode",
-        horizontal=True,
-        help="'Source question order' keeps the order questions appear in "
-        "your source CSV. 'Strict ARC catalog order' instead lays rows out "
-        "exactly as they appear in the ARC catalog file; new questions are "
-        "placed next to their saved Form Name and Section Header.",
-    )
-    arc_order = order_mode == "Strict ARC catalog order"
-
-    reorder_forms = st.session_state.get("reorder_forms_confirm", False)
-    data_dictionary_df, form_order_issues = build_data_dictionary(
+    data_dictionary_df, ordering_warnings = build_data_dictionary(
         st.session_state.arc_catalog_df,
         st.session_state.decisions,
         translation=translation,
-        reorder_forms=reorder_forms,
         standalone_questions=st.session_state.get("standalone_questions", []),
-        arc_order=arc_order,
     )
 
-    if form_order_issues:
-        st.error(
-            "The data dictionary can't keep the source question order — REDCap "
-            "requires each form's rows to stay together as one block:"
+    if ordering_warnings:
+        st.warning(
+            "Some branching-logic dependencies cross form or section blocks, "
+            "so those questions were left in their ARC order:"
         )
-        for issue in form_order_issues:
+        for issue in ordering_warnings:
             st.write(f"- {issue}")
-        st.checkbox(
-            "Reorder rows so each form is grouped together (recommended)",
-            key="reorder_forms_confirm",
-            help="Groups rows by form (keeping each form's own question order "
-            "intact), which resolves the issue above. Leave unchecked to fix "
-            "the source order yourself instead.",
-        )
 
     dictionary_bytes = data_dictionary_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
@@ -1986,7 +1966,7 @@ def _render_export():
         dictionary_bytes,
         file_name=f"datadictionary_{_get_timestamp()}.csv",
         mime="text/csv",
-        disabled=data_dictionary_df.empty or bool(form_order_issues),
+        disabled=data_dictionary_df.empty,
     )
 
 
