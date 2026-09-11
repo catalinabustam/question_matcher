@@ -32,13 +32,15 @@ REDCAP_VALIDATION_TYPES: frozenset[str] = frozenset(
         "zipcode",
         "alpha_only",
         "signature",
+        "units",
+        "autocomplete",
     }
 )
 
 _CHOICE_FIELD_TYPES = {"radio", "dropdown", "checkbox"}
 
 _VARIABLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-_VARIABLE_MAX_LEN = 26
+_VARIABLE_MAX_LEN = 32
 
 _BRANCHING_LOGIC_VARIABLE_RE = re.compile(r"\[(\w+)")
 
