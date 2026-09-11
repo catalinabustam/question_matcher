@@ -203,12 +203,12 @@ class StandaloneQuestion:
     """A new question added manually, not tied to any source CSV row.
 
     `st_id` is a human-readable label (`st_1`, `st_2`, …) shown in the export
-    table. `after_source_index` controls placement: -1 inserts before the first
-    source question, 0 after question 1, and so on.
+    table. `after_source_index` controls placement after a source question:
+    0 places it after question 1, and so on.
     """
 
     st_id: str
-    after_source_index: int = -1
+    after_source_index: int = 0
     new_id: str = ""
     new_form_name: str = ""
     new_section: str = ""
@@ -236,7 +236,11 @@ class StandaloneQuestion:
     @classmethod
     def from_dict(cls, data: dict) -> "StandaloneQuestion":
         kwargs = {name: data.get(name, "") for name in _STANDALONE_STR_FIELDS}
-        kwargs["after_source_index"] = int(data.get("after_source_index", -1))
+        # Older saved progress could place a question before question 1.
+        # Normalize that retired position to after question 1.
+        kwargs["after_source_index"] = max(
+            0, int(data.get("after_source_index", 0))
+        )
         return cls(**kwargs)
 
 
@@ -253,10 +257,7 @@ def iter_ordered_items(
     """Yield decisions and standalone questions in export/dictionary order."""
     by_position: dict[int, list[StandaloneQuestion]] = defaultdict(list)
     for question in standalone_questions:
-        by_position[question.after_source_index].append(question)
-
-    for question in by_position.get(-1, []):
-        yield ("standalone", question)
+        by_position[max(question.after_source_index, 0)].append(question)
 
     for index, decision in enumerate(decisions):
         yield ("decision", decision)
