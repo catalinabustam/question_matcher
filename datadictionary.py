@@ -1,12 +1,9 @@
 """Build a REDCap-style data dictionary CSV from ARC catalog rows.
 
-Row order follows the source questions' own order (i.e. `decisions` order),
-not a dependency-graph reorder: for each decision, in order, its matched
-ARC row(s) are emitted, then its newly-created question (if any). REDCap
-requires each `Form Name` to appear as a single contiguous block though, so
-if the source order interleaves forms, `build_data_dictionary` reports
-which question(s) break contiguity instead of silently reordering — see
-`reorder_forms`.
+Rows are always arranged in the original ARC form, section, and variable
+order. New questions are anchored within their selected form/section block;
+new sections and forms are appended after the known blocks. This keeps each
+REDCap form contiguous without relying on source-CSV order.
 
 Input rows must come from the ARC catalog (same columns as `ARC.csv`:
 `Form`, `Section`, `Variable`, `Type`, `Question`, `Answer Options`,
@@ -460,10 +457,16 @@ def _ordered_dictionary_rows(
     """
     standalone_questions = standalone_questions or []
     frames: list[pd.DataFrame] = []
+    most_recent_variable = ""
 
     for kind, item in iter_ordered_items(decisions, standalone_questions):
         if kind == "standalone":
             frame = _standalone_created_frame(item, lists_path)
+            if not frame.empty and most_recent_variable:
+                # Keep the selected "after question" relationship available
+                # through the later block and dependency ordering passes.
+                frame = frame.copy()
+                frame["_placement_anchor"] = most_recent_variable
         else:
             decision = item
             if decision.status not in (
@@ -476,11 +479,16 @@ def _ordered_dictionary_rows(
             created_frame = _decision_created_frame(decision, lists_path)
             for frame in (matched_frame, created_frame):
                 if not frame.empty:
+                    if frame is created_frame and most_recent_variable:
+                        frame = frame.copy()
+                        frame["_placement_anchor"] = most_recent_variable
                     frames.append(frame)
+                    most_recent_variable = frame.iloc[-1][_FIELDNAME_COLUMN]
             continue
 
         if not frame.empty:
             frames.append(frame)
+            most_recent_variable = frame.iloc[-1][_FIELDNAME_COLUMN]
 
     if not frames:
         return pd.DataFrame(columns=_REDCAP_COLUMNS)
@@ -495,15 +503,10 @@ def _ordered_dictionary_rows(
 def _insert_missing_branching_logic_rows(
     df: pd.DataFrame, arc_catalog: pd.DataFrame, lists_path: str
 ) -> pd.DataFrame:
-    """Add a row for every branching-logic/annotation/choices variable that
-    doesn't already have its own row, inserted directly before the row that
-    references it (dependencies of dependencies are inserted first).
+    """Add missing referenced ARC rows after the initial block ordering.
 
-    Only ever pulled from the *original* ARC catalog, and only when the
-    variable is genuinely missing — an existing row is never touched. The
-    inserted row's Form Name is overwritten to match whichever row
-    references it, since it's being pulled in purely to satisfy that
-    reference, not because it belongs to that form in ARC.
+    Their original ARC form and section are retained; the caller lays them
+    out by the raw catalog afterwards. Existing rows are never changed.
     """
     if arc_catalog.empty:
         return df
@@ -516,7 +519,7 @@ def _insert_missing_branching_logic_rows(
     )
 
     known = set(df[_FIELDNAME_COLUMN])
-    output_rows: list[pd.DataFrame] = []
+    added_rows: list[pd.Series] = []
 
     def insert_dependencies(row: pd.Series) -> None:
         for variable in _row_references(row):
@@ -531,145 +534,106 @@ def _insert_missing_branching_logic_rows(
                 continue
 
             dep_row = dependency.iloc[0].copy()
-            dep_row[_FORM_COLUMN] = row[_FORM_COLUMN]
             insert_dependencies(dep_row)
-            output_rows.append(dep_row.to_frame().T)
-
-        output_rows.append(row.to_frame().T)
+            added_rows.append(dep_row)
 
     for _, row in df.iterrows():
         insert_dependencies(row)
 
-    return pd.concat(output_rows, ignore_index=True) if output_rows else df
-
-
-# --------------------------------------------------------------------------- #
-# Form-order validation / fix-up
-# --------------------------------------------------------------------------- #
-
-
-def _detect_form_order_issues(df: pd.DataFrame) -> list[str]:
-    """Questions whose Form breaks REDCap's "one contiguous block per form"
-    rule, given the dictionary's current row order.
-
-    Returns one human-readable message per offending row, naming its
-    Variable/Field Name and Form — empty if the current order is already
-    REDCap-valid.
-    """
-    issues: list[str] = []
-    seen_forms: set[str] = set()
-    current_form: str | None = None
-
-    for _, row in df.iterrows():
-        form = row[_FORM_COLUMN]
-        if not form or form == current_form:
-            continue
-        if form in seen_forms:
-            issues.append(
-                f"Question '{row[_FIELDNAME_COLUMN]}' (Form '{form}') comes after "
-                f"other forms have already started — Form '{form}' is not "
-                "contiguous in the source order."
-            )
-        seen_forms.add(form)
-        current_form = form
-
-    return issues
-
-
-def _reorder_forms_sequential(df: pd.DataFrame) -> pd.DataFrame:
-    """Group rows so each Form Name appears as one contiguous block.
-
-    Rows are grouped by first-appearance order (stable sort), so each
-    form's own internal row order — i.e. the source order within that
-    form — is preserved.
-    """
-    form_rank = {
-        form: rank for rank, form in enumerate(dict.fromkeys(df[_FORM_COLUMN]))
-    }
     return (
-        df.assign(_form_rank=df[_FORM_COLUMN].map(form_rank))
-        .sort_values("_form_rank", kind="stable")
-        .drop(columns="_form_rank")
-        .reset_index(drop=True)
+        pd.concat([df, pd.DataFrame(added_rows)], ignore_index=True)
+        if added_rows
+        else df
     )
 
 
-def _arc_catalog_order_map(arc_catalog: pd.DataFrame) -> dict[str, int]:
-    """Map each ARC `Variable` to its row position in the original ARC
-    catalog (first occurrence), defining the "strict ARC order" that
-    `_reorder_by_arc_catalog` sorts matched rows by.
-    """
-    if arc_catalog.empty or "Variable" not in arc_catalog.columns:
-        return {}
-    variables = arc_catalog["Variable"].dropna().astype(str)
-    order: dict[str, int] = {}
-    for position, variable in enumerate(variables):
-        order.setdefault(variable, position)
-    return order
+def _catalog_layout(
+    arc_catalog: pd.DataFrame,
+) -> tuple[list[str], dict[str, list[str]], dict[str, int]]:
+    """Read the form, section, and variable order directly from raw ARC."""
+    forms: list[str] = []
+    sections: dict[str, list[str]] = defaultdict(list)
+    variable_order: dict[str, int] = {}
+    for index, row in arc_catalog.reset_index(drop=True).iterrows():
+        form = "" if pd.isna(row.get("Form", "")) else str(row.get("Form", ""))
+        section = "" if pd.isna(row.get("Section", "")) else str(row.get("Section", ""))
+        variable = "" if pd.isna(row.get("Variable", "")) else str(row.get("Variable", ""))
+        if form not in forms:
+            forms.append(form)
+        if section not in sections[form]:
+            sections[form].append(section)
+        if variable:
+            variable_order.setdefault(variable, index)
+    return forms, sections, variable_order
 
 
 def _reorder_by_arc_catalog(df: pd.DataFrame, arc_catalog: pd.DataFrame) -> pd.DataFrame:
-    """Reorder `df` so every row matched to an ARC catalog question follows
-    the exact order of the original ARC catalog file.
+    """Lay out rows by raw ARC form/section blocks and variable index.
 
-    Rows whose variable isn't in ARC (newly created / standalone questions)
-    are slotted in right after the last ARC row sharing their Form Name and
-    Section Header, falling back to the last ARC row sharing just their
-    Form Name, and finally grouped at the very end (one contiguous block
-    per form, in first-appearance order) if their Form Name isn't in ARC
-    at all. This keeps every form contiguous, satisfying REDCap's
-    requirement, since the ARC catalog is itself grouped by form.
+    Rows not present in ARC are kept directly after the prior selected row
+    when that row is in the same block. A new section is instead appended as
+    its own final block in the known form; an entirely new form is appended
+    after all ARC forms.
     """
-    order_map = _arc_catalog_order_map(arc_catalog)
-    arc_mask = df[_FIELDNAME_COLUMN].isin(order_map)
+    if df.empty:
+        return df
+    forms, sections_by_form, variable_order = _catalog_layout(arc_catalog)
+    rows = df.copy().reset_index(drop=True)
+    rows["_source_rank"] = range(len(rows))
+    rows["_form"] = rows[_FORM_COLUMN].fillna("").astype(str)
+    rows["_section"] = rows[_SECTION_COLUMN].fillna("").astype(str)
 
-    arc_rows = df[arc_mask].copy()
-    arc_rows["_order"] = arc_rows[_FIELDNAME_COLUMN].map(order_map)
-    arc_rows = (
-        arc_rows.sort_values("_order", kind="stable")
-        .drop(columns="_order")
-        .reset_index(drop=True)
-    )
+    present_forms = list(dict.fromkeys(rows["_form"]))
+    form_order = forms + [form for form in present_forms if form not in forms]
+    output: list[pd.Series] = []
 
-    new_rows = df[~arc_mask]
-    if new_rows.empty:
-        return arc_rows
+    for form in form_order:
+        form_rows = rows[rows["_form"] == form]
+        if form_rows.empty:
+            continue
+        present_sections = list(dict.fromkeys(form_rows["_section"]))
+        section_order = sections_by_form.get(form, []) + [
+            section for section in present_sections
+            if section not in sections_by_form.get(form, [])
+        ]
+        for section in section_order:
+            block = form_rows[form_rows["_section"] == section]
+            if block.empty:
+                continue
+            known = block[block[_FIELDNAME_COLUMN].isin(variable_order)].copy()
+            new = block[~block[_FIELDNAME_COLUMN].isin(variable_order)].copy()
+            known = known.sort_values(
+                _FIELDNAME_COLUMN,
+                key=lambda values: values.map(variable_order),
+                kind="stable",
+            )
+            if new.empty:
+                output.extend(row for _, row in known.iterrows())
+                continue
 
-    # For each (form, section) / form seen among the ARC rows, remember the
-    # last positional index in `arc_rows` where it appears — that's where a
-    # new row anchored to it gets inserted right after.
-    last_index_for_form_section: dict[tuple[str, str], int] = {}
-    last_index_for_form: dict[str, int] = {}
-    for position, row in arc_rows.iterrows():
-        form, section = row[_FORM_COLUMN], row[_SECTION_COLUMN]
-        last_index_for_form_section[(form, section)] = position
-        last_index_for_form[form] = position
+            # The initial frame order already encodes a created question's
+            # attached match and a standalone question's selected "after"
+            # question. Preserve that anchor only inside this exact block.
+            anchors: dict[str, list[pd.Series]] = defaultdict(list)
+            tail: list[pd.Series] = []
+            for _, new_row in new.sort_values("_source_rank", kind="stable").iterrows():
+                prior = block[
+                    (block["_source_rank"] < new_row["_source_rank"])
+                    & block[_FIELDNAME_COLUMN].isin(variable_order)
+                ]
+                if prior.empty:
+                    tail.append(new_row)
+                else:
+                    anchor = prior.iloc[-1][_FIELDNAME_COLUMN]
+                    anchors[anchor].append(new_row)
+            for _, known_row in known.iterrows():
+                output.append(known_row)
+                output.extend(anchors.get(known_row[_FIELDNAME_COLUMN], []))
+            output.extend(tail)
 
-    inserts_after: dict[int, list[pd.Series]] = defaultdict(list)
-    unanchored: list[pd.Series] = []
-    for _, row in new_rows.iterrows():
-        form, section = row[_FORM_COLUMN], row[_SECTION_COLUMN]
-        anchor = last_index_for_form_section.get((form, section))
-        if anchor is None:
-            anchor = last_index_for_form.get(form)
-        if anchor is None:
-            unanchored.append(row)
-        else:
-            inserts_after[anchor].append(row)
-
-    output_rows: list[pd.Series] = []
-    for position, row in arc_rows.iterrows():
-        output_rows.append(row)
-        output_rows.extend(inserts_after.get(position, []))
-
-    if unanchored:
-        # None of these rows' forms exist in ARC at all — group them by
-        # form (first-appearance order) so each still forms one contiguous
-        # block, then append that block at the very end.
-        tail = _reorder_forms_sequential(pd.DataFrame(unanchored).reset_index(drop=True))
-        output_rows.extend(row for _, row in tail.iterrows())
-
-    return pd.DataFrame(output_rows).reset_index(drop=True)
+    return pd.DataFrame(output).drop(
+        columns=["_source_rank", "_form", "_section"], errors="ignore"
+    ).reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -696,45 +660,67 @@ def _dependency_graph(df: pd.DataFrame) -> dict[str, set[str]]:
     return dependencies
 
 
-def _ensure_dependency_order(df: pd.DataFrame) -> pd.DataFrame:
-    """Reorder rows, minimally, so every variable referenced in a row's
-    branching logic / calc / annotation appears in an earlier row than the
-    row that references it — regardless of which ordering mode (source
-    order or strict ARC order) produced `df`.
+def _ensure_dependency_order(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Move dependencies before dependants only within a form/section block.
 
-    Uses a stable, layer-by-layer topological sort (Kahn's algorithm):
-    rows with no outstanding dependencies are placed first, in their
-    existing relative order; once placed, they unblock the rows that
-    depended on them, and so on. A reference cycle — which shouldn't occur
-    in valid branching logic, but would otherwise loop forever — is broken
-    by placing any rows still stuck once a pass makes no progress in their
-    original relative order.
+    Cross-block dependencies cannot be moved without breaking the ARC form
+    and section layout, so their original positions are retained and a clear
+    warning is returned for export.
     """
     if df.empty:
-        return df
+        return df, []
 
-    dependencies = _dependency_graph(df)
-    rows_by_variable = {row[_FIELDNAME_COLUMN]: row for _, row in df.iterrows()}
+    variables_to_block = {
+        row[_FIELDNAME_COLUMN]: (row[_FORM_COLUMN], row[_SECTION_COLUMN])
+        for _, row in df.iterrows()
+    }
+    warnings: list[str] = []
+    warned: set[tuple[str, str]] = set()
+    output: list[pd.Series] = []
 
-    placed: list[str] = []
-    placed_set: set[str] = set()
-    pending = list(df[_FIELDNAME_COLUMN])
+    for _, block in df.groupby([_FORM_COLUMN, _SECTION_COLUMN], sort=False, dropna=False):
+        rows_by_variable = {
+            row[_FIELDNAME_COLUMN]: row for _, row in block.iterrows()
+        }
+        dependencies: dict[str, set[str]] = {}
+        for variable, row in rows_by_variable.items():
+            same_block: set[str] = set()
+            placement_anchor = row.get("_placement_anchor", "")
+            if placement_anchor in rows_by_variable and placement_anchor != variable:
+                # This is the saved attachment/"after" choice for a newly
+                # created or standalone question, not a branching reference.
+                same_block.add(placement_anchor)
+            for referenced in _row_references(row):
+                target_block = variables_to_block.get(referenced)
+                if target_block is None or referenced == variable:
+                    continue
+                if target_block == (row[_FORM_COLUMN], row[_SECTION_COLUMN]):
+                    same_block.add(referenced)
+                else:
+                    warning_key = (variable, referenced)
+                    if warning_key not in warned:
+                        warnings.append(
+                            f"Question '{variable}' references '{referenced}' in a "
+                            "different form or section; it was not moved."
+                        )
+                        warned.add(warning_key)
+            dependencies[variable] = same_block
 
-    while pending:
-        ready, still_pending = [], []
-        for variable in pending:
-            (ready if dependencies[variable] <= placed_set else still_pending).append(
-                variable
-            )
-        if not ready:
-            # Cycle or unsatisfiable dependency — stop looping and place
-            # what's left in its original order.
-            ready, still_pending = still_pending, []
-        placed.extend(ready)
-        placed_set.update(ready)
-        pending = still_pending
+        placed: list[str] = []
+        placed_set: set[str] = set()
+        pending = list(rows_by_variable)
+        while pending:
+            ready = [v for v in pending if dependencies[v] <= placed_set]
+            if not ready:
+                # A cycle remains in its already-ordered ARC position.
+                placed.extend(pending)
+                break
+            placed.extend(ready)
+            placed_set.update(ready)
+            pending = [v for v in pending if v not in ready]
+        output.extend(rows_by_variable[variable] for variable in placed)
 
-    return pd.DataFrame([rows_by_variable[v] for v in placed]).reset_index(drop=True)
+    return pd.DataFrame(output).reset_index(drop=True), warnings
 
 
 def _dedupe_section_headers(df: pd.DataFrame) -> pd.DataFrame:
@@ -747,7 +733,7 @@ def _dedupe_section_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     section = df[_SECTION_COLUMN]
-    keep = (section != "") & ~section.duplicated()
+    keep = (section != "") & ~df.duplicated([_FORM_COLUMN, _SECTION_COLUMN])
     df[_SECTION_COLUMN] = section.where(keep, "")
     return df
 
@@ -873,31 +859,13 @@ def build_data_dictionary(
     arc_catalog: pd.DataFrame,
     decisions: list[MatchDecision],
     translation: pd.DataFrame | None = None,
-    reorder_forms: bool = False,
     lists_path: str = _DEFAULT_LISTS_PATH,
     standalone_questions: list[StandaloneQuestion] | None = None,
-    arc_order: bool = False,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Build the REDCap data dictionary, in source-question order.
+    """Build the data dictionary in raw ARC form/section/variable order.
 
-    Returns `(dictionary_df, form_order_issues)`:
-    - `dictionary_df` has exactly the `_REDCAP_COLUMNS`, in that order.
-    - `form_order_issues` names every question that breaks REDCap's "one
-      contiguous block per Form" rule when rows are kept in source order.
-      Non-empty issues mean `dictionary_df` is NOT REDCap-valid yet — show
-      them to the user and, only if they confirm, call again with
-      `reorder_forms=True` to regroup rows by form instead.
-
-    If `arc_order` is True, rows are instead laid out in the exact order
-    of the original ARC catalog (see `_reorder_by_arc_catalog`); newly
-    created / standalone questions are anchored next to their saved Form
-    Name and Section Header. This mode is always REDCap-valid, so
-    `reorder_forms` is ignored and `form_order_issues` is always empty.
-
-    Either way, a final pass (`_ensure_dependency_order`) guarantees any
-    variable named in a row's branching logic, calc, or annotation ends up
-    placed before that row — this can itself shift rows around, so
-    `form_order_issues` is (re-)detected after it, not before.
+    The returned list contains only cross-block branching warnings; it does
+    not block export.
     """
     df = _ordered_dictionary_rows(
         decisions, arc_catalog, lists_path, standalone_questions
@@ -905,19 +873,24 @@ def build_data_dictionary(
     if df.empty:
         return pd.DataFrame(columns=_REDCAP_COLUMNS), []
 
-    df = _insert_missing_branching_logic_rows(df, arc_catalog, lists_path)
     df = _drop_duplicate_fieldnames(df)
 
-    if arc_order:
-        df = _reorder_by_arc_catalog(df, arc_catalog)
-    elif reorder_forms and _detect_form_order_issues(df):
-        df = _reorder_forms_sequential(df)
+    # First establish every known form/section block from raw ARC, then make
+    # dependency moves only where they do not cross a block boundary.
+    df = _reorder_by_arc_catalog(df, arc_catalog)
+    df, warnings = _ensure_dependency_order(df)
+
+    # Dependencies are deliberately fetched only after the user-selected
+    # questions have been ordered. Re-laying out the augmented set preserves
+    # the ARC form/section/variable index for each fetched row.
+    df = _insert_missing_branching_logic_rows(df, arc_catalog, lists_path)
+    df = _drop_duplicate_fieldnames(df)
+    df = _reorder_by_arc_catalog(df, arc_catalog)
+    df, dependency_warnings = _ensure_dependency_order(df)
+    warnings.extend(warning for warning in dependency_warnings if warning not in warnings)
 
     rename_map = build_variable_rename_map(decisions)
     df = _apply_variable_renames(df, rename_map)
-    df = _ensure_dependency_order(df)
-
-    issues = [] if arc_order else _detect_form_order_issues(df)
 
     if translation is not None:
         skip_label, skip_choices = _translation_override_skip_sets(decisions)
@@ -926,4 +899,4 @@ def build_data_dictionary(
     df = _dedupe_section_headers(df)
 
     df = df.reindex(columns=_REDCAP_COLUMNS).fillna("")
-    return df, issues
+    return df, warnings
