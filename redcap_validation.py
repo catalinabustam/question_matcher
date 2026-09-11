@@ -56,6 +56,7 @@ def validate_record(
     fields: Mapping[str, str],
     existing_ids: set[str],
     available_field_types: Iterable[str],
+    require_form_and_section: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Validate one REDCap data-dictionary row.
 
@@ -87,7 +88,11 @@ def validate_record(
             errors.append(f"Variable/Field Name '{variable}' is already in use.")
 
     if not (fields.get("form_name") or "").strip():
-        warnings.append("Form Name is required.")
+        (errors if require_form_and_section else warnings).append(
+            "Form Name is required."
+        )
+    if require_form_and_section and not (fields.get("section") or "").strip():
+        errors.append("Section Header is required.")
     if not (fields.get("label") or "").strip():
         errors.append("Field Label is required.")
 
