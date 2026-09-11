@@ -138,7 +138,7 @@ def _column_selector(df: pd.DataFrame, label: str, key: str, optional: bool = Fa
 
 def _candidate_label(candidate, exact_match: bool = False) -> str:
     badge = "  ·  🟢 Same ARC variable name" if exact_match else ""
-    return (f"{candidate.question.question}  ·  section: {candidate.question.section or '—'}"
+    return (f"{candidate.question.question}  ·  section: {candidate.question.section or '—'}  ·  form: {candidate.question.form_name or '—'}"
             f"  ·  score: {candidate.score:.0%}{badge}")
 
 
@@ -251,6 +251,7 @@ def _init_session(source_qs, matcher: QuestionMatchingService, reference_df: pd.
     st.session_state.matcher = matcher
     st.session_state.current_idx = 0
     st.session_state.flow_started = True
+    st.session_state.export_table_key = 0
     
     st.session_state.reference_df = reference_df
     st.session_state.scope_filters = scope_filters
@@ -283,9 +284,11 @@ def _reset_session():
         "source_filename",
         "reorder_forms_confirm",
         "standalone_questions",
+        "last_registered_section_header",
         "reference_by_variable",
         "auto_match_exact_variables",
         "skip_matched_in_nav",
+        "export_table_key",
     ):
         st.session_state.pop(key, None)
 
@@ -311,6 +314,12 @@ def _existing_variable_ids(exclude: MatchDecision | None = None) -> set[str]:
         for question in st.session_state.get("standalone_questions", [])
     }
     return arc_ids | created_ids | standalone_ids
+
+
+def _remember_section_header(section: str | None) -> None:
+    """Use a saved question's section as the next creation default."""
+    if section:
+        st.session_state.last_registered_section_header = section
 
 
 def _pending_exact_variable_matches() -> dict[int, Question]:
@@ -358,6 +367,7 @@ def _apply_exact_variable_autoskip() -> None:
         decision.matched = matched
         decision.matches = [matched]
         decision.field_overrides = {}
+        _remember_section_header(matched.section)
 
 
 def _save_decision(
@@ -408,6 +418,7 @@ def _save_decision(
         decision.new_text_source = new_text_source
         decision.new_form_name = new_form_name or preview["new_form_name"]
         decision.new_section = new_section or preview["new_section"]
+        _remember_section_header(decision.new_section)
         decision.new_field_type = new_field_type or preview["new_field_type"]
         decision.new_text = new_text or preview["new_text"]
         decision.new_text_source = new_text_source
@@ -497,6 +508,13 @@ def _save_decision(
         decision.field_overrides = (
             field_overrides or {} if len(matched_questions) == 1 else {}
         )
+        if matched_questions:
+            section = (
+                decision.source.section
+                if decision.field_overrides.get("section") == "source"
+                else matched_questions[0].section
+            )
+            _remember_section_header(section)
 
 
 # --------------------------------------------------------------------------- #
@@ -1014,7 +1032,27 @@ def _render_question_flow():
             available_sections = [decision.new_section] + available_sections
             available_sections_lower = [section.lower() for section in available_sections]
 
-        default_selected_section = decision.new_section or source.section or None
+        last_registered_section = st.session_state.get(
+            "last_registered_section_header", ""
+        )
+        if last_registered_section:
+            last_registered_section = next(
+                (
+                    section
+                    for section in available_sections
+                    if section.lower() == last_registered_section.lower()
+                ),
+                last_registered_section,
+            )
+        if (
+            last_registered_section
+            and last_registered_section.lower() not in available_sections_lower
+        ):
+            available_sections = [last_registered_section] + available_sections
+
+        default_selected_section = (
+            decision.new_section or last_registered_section or source.section or None
+        )
 
         # Defaults for the free-text fields below (question text, options,
         # validation, ...) — section-independent, so safe to compute before
@@ -1522,11 +1560,75 @@ def _render_question_flow():
 
 
 def _standalone_position_label(after_source_index: int, total: int) -> str:
-    if after_source_index < 0:
-        return "Before question 1"
     if after_source_index >= total - 1:
         return f"After question {total}"
-    return f"After question {after_source_index + 1}"
+    return f"After question {max(after_source_index, 0) + 1}"
+
+
+def _set_standalone_defaults_from_position(
+    defaults_by_position: dict[str, dict[str, str]],
+) -> None:
+    """Set standalone fields to match the selected insertion anchor."""
+    position = st.session_state.get("standalone_position", "")
+    st.session_state.update(defaults_by_position.get(position, {}))
+
+
+def _standalone_defaults_from_question(question: Question) -> dict[str, str]:
+    """Map a question's fields to the standalone form's widget keys."""
+    return {
+        "standalone_variable": question.variable or "",
+        "standalone_form": question.form_name or "",
+        "standalone_section": question.section or "",
+        "standalone_field_type": question.field_type or "",
+        "standalone_text": question.question or "",
+        "standalone_options": question.options or "",
+        "standalone_field_note": question.field_note or "",
+        "standalone_validation_type": question.validation or "",
+        "standalone_validation_min": question.validation_min or "",
+        "standalone_validation_max": question.validation_max or "",
+        "standalone_required": question.required_field or "",
+        "standalone_branching": question.branching_logic or "",
+    }
+
+
+def _standalone_anchor_defaults(decision: MatchDecision) -> dict[str, str]:
+    """Return the saved decision's fields as standalone form defaults."""
+    if decision.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED):
+        return {
+            "standalone_variable": decision.new_id or "",
+            "standalone_form": decision.new_form_name or "",
+            "standalone_section": decision.new_section or "",
+            "standalone_field_type": decision.new_field_type or "",
+            "standalone_text": decision.new_text or "",
+            "standalone_options": decision.new_options or "",
+            "standalone_field_note": decision.new_field_note or "",
+            "standalone_validation_type": decision.new_validation_type or "",
+            "standalone_validation_min": decision.new_validation_min or "",
+            "standalone_validation_max": decision.new_validation_max or "",
+            "standalone_required": decision.new_required_field or "",
+            "standalone_branching": decision.new_branching_logic or "",
+        }
+
+    matched_questions = decision.matched_questions
+    if matched_questions:
+        matched = matched_questions[0]
+        defaults = _standalone_defaults_from_question(matched)
+        for field, widget_key in (
+            ("form_name", "standalone_form"),
+            ("section", "standalone_section"),
+            ("field_type", "standalone_field_type"),
+            ("question", "standalone_text"),
+            ("options", "standalone_options"),
+            ("field_note", "standalone_field_note"),
+            ("validation", "standalone_validation_type"),
+            ("required_field", "standalone_required"),
+            ("branching_logic", "standalone_branching"),
+        ):
+            if decision.field_overrides.get(field) == "source":
+                defaults[widget_key] = getattr(decision.source, field) or ""
+        return defaults
+
+    return _standalone_defaults_from_question(decision.source)
 
 
 def _render_standalone_questions():
@@ -1535,18 +1637,23 @@ def _render_standalone_questions():
     st.subheader("3. Add standalone question")
     st.caption(
         "Add a new question that does not come from the source CSV. Each one "
-        "gets an index like st_1, st_2, … and can be placed before or after "
-        "any source question."
+        "gets an index like st_1, st_2, … and can be placed after any source "
+        "question."
     )
 
     standalone_questions: list[StandaloneQuestion] = st.session_state.get(
         "standalone_questions", []
     )
     total = len(st.session_state.source_questions)
-    position_labels = ["Before question 1"] + [
-        f"After question {index + 1}" for index in range(total)
-    ]
-    position_values = [-1, *range(total)]
+    if not total:
+        st.info("Add source questions before adding a standalone question.")
+        return
+    position_labels = [f"After question {index + 1}" for index in range(total)]
+    position_values = list(range(total))
+    defaults_by_position = {
+        f"After question {index + 1}": _standalone_anchor_defaults(decision)
+        for index, decision in enumerate(st.session_state.decisions)
+    }
 
     available_forms = sorted(
         st.session_state.reference_df["Form"].dropna().astype(str).unique().tolist()
@@ -1564,14 +1671,34 @@ def _render_standalone_questions():
     next_st_id = next_standalone_st_id(standalone_questions)
 
     with st.expander("➕ Add a standalone question", expanded=False):
+        if st.session_state.get("standalone_position") not in position_labels:
+            st.session_state.standalone_position = position_labels[-1]
         position_choice = st.selectbox(
             "Insert position",
             options=position_labels,
             index=len(position_labels) - 1,
             key="standalone_position",
+            on_change=_set_standalone_defaults_from_position,
+            args=(defaults_by_position,),
             help="Where this question should appear relative to the source questions.",
         )
         after_source_index = position_values[position_labels.index(position_choice)]
+        anchor_defaults = defaults_by_position[position_choice]
+        anchor_form = anchor_defaults["standalone_form"]
+        anchor_section = anchor_defaults["standalone_section"]
+        if anchor_form and anchor_form not in available_forms:
+            available_forms = [anchor_form] + available_forms
+        if anchor_section and anchor_section not in available_sections:
+            available_sections = [anchor_section] + available_sections
+        for key, value in anchor_defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = value
+        current_form = st.session_state.standalone_form
+        if current_form and current_form not in available_forms:
+            available_forms = [current_form] + available_forms
+        current_section = st.session_state.standalone_section
+        if current_section and current_section not in available_sections:
+            available_sections = [current_section] + available_sections
 
         col1, col2 = st.columns(2)
         with col1:
@@ -1591,6 +1718,8 @@ def _render_standalone_questions():
             default_field_type = (
                 "text" if "text" in field_type_options else field_type_options[0]
             )
+            if st.session_state.standalone_field_type not in field_type_options:
+                st.session_state.standalone_field_type = default_field_type
             new_field_type = st.selectbox(
                 "Field Type *",
                 options=field_type_options,
@@ -1599,9 +1728,9 @@ def _render_standalone_questions():
             )
             new_field_name = st.text_input(
                 "Variable / Field Name *",
-                value=next_st_id,
                 key="standalone_variable",
-                help=f"Defaults to the standalone index ({next_st_id}). Edit if needed.",
+                help="Copied from the selected anchor. It must be unique, so edit it "
+                "before saving if it is already in use.",
             )
 
         new_text = st.text_area(
@@ -1633,6 +1762,8 @@ def _render_standalone_questions():
                 key="standalone_validation_max",
             )
 
+        if st.session_state.standalone_required not in ("", "yes", "no"):
+            st.session_state.standalone_required = ""
         new_required_field = st.selectbox(
             "Required Field?",
             options=["", "yes", "no"],
@@ -1705,6 +1836,7 @@ def _render_standalone_questions():
                 )
             )
             st.session_state.standalone_questions = standalone_questions
+            _remember_section_header(new_section)
             st.rerun()
 
     if standalone_questions:
@@ -1756,12 +1888,14 @@ def _render_export():
         cols_order = ["source_question_index"] + [c for c in display_df.columns if c != "source_question_index"]
         display_df = display_df[cols_order]
 
+    export_table_key = st.session_state.get("export_table_key", 0)
     export_table = st.dataframe(
         display_df,
         use_container_width=True,
         height=250,
         on_select="rerun",
         selection_mode="single-row",
+        key=f"export_table_{export_table_key}",
     )
 
     selection = getattr(export_table, "selection", None)
@@ -1777,6 +1911,7 @@ def _render_export():
                 if 0 <= target_index < len(st.session_state.source_questions):
                     if target_index != st.session_state.current_idx:
                         st.session_state.current_idx = target_index
+                        st.session_state.export_table_key = export_table_key + 1
                         st.rerun()
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
