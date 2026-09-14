@@ -94,7 +94,7 @@ def _render_index_controls() -> None:
     if st.sidebar.button(
         button_label,
         type=button_type,
-        use_container_width=True,
+        width='stretch',
         disabled=st.session_state.get("flow_started", False),
     ):
         try:
@@ -929,7 +929,7 @@ def _render_question_flow():
                     candidate.question.row_index
                 ]
                 st.dataframe(
-                    arc_row.astype(str).rename("Value"), use_container_width=True
+                    arc_row.astype(str).rename("Value"), width='stretch'
                 )
 
     count_col, deselect_col = st.columns([5, 1])
@@ -1856,7 +1856,7 @@ def _render_standalone_questions():
             for question in standalone_questions
         ]
         st.markdown("**Standalone questions added**")
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(summary_rows), width='stretch', hide_index=True)
         delete_choice = st.selectbox(
             "Remove a standalone question",
             options=[""] + [question.st_id for question in standalone_questions],
@@ -1893,7 +1893,7 @@ def _render_export():
     export_table_key = st.session_state.get("export_table_key", 0)
     export_table = st.dataframe(
         display_df,
-        use_container_width=True,
+        width='stretch',
         height=250,
         on_select="rerun",
         selection_mode="single-row",
