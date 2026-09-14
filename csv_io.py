@@ -122,7 +122,7 @@ def _decision_export_rows(
             }
             rows.append(
                 {
-                    "source_question_index": decision.source.row_index + 1,
+                    "source_question_index": str(decision.source.row_index + 1),
                     "original_form_name": decision.source.form_name or "",
                     "original_section": decision.source.section,
                     "original_topic": decision.source.topic or "",
@@ -172,7 +172,7 @@ def _decision_export_rows(
     if decision.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED):
         rows.append(
             {
-                "source_question_index": decision.source.row_index + 1,
+                "source_question_index": str(decision.source.row_index + 1),
                 "original_form_name": decision.source.form_name or "",
                 "original_section": decision.source.section,
                 "original_topic": decision.source.topic or "",
