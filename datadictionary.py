@@ -137,7 +137,7 @@ _OVERRIDE_REDCAP_COLUMNS = {
     "field_annotation": _FIELD_ANNOTATION_COLUMN,
 }
 
-_DEFAULT_LISTS_PATH = "ARC_Lists/"
+_DEFAULT_LISTS_PATH = "arc_data/Lists"
 
 
 def _reorder_with_other_options(df: pd.DataFrame) -> pd.DataFrame:
