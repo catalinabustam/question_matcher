@@ -1,162 +1,84 @@
 # Question Matcher
 
-A very lightweight Streamlit app (`streamlit` + `pandas` + `requests`, plus
-`deepl` for optional DeepL translation — Ollama needs no extra package,
-just a running local instance) to compare a CSV of questions against the
-[ISARIC ARC](https://github.com/ISARICResearch/ARC) reference catalog, match
-each question to its equivalent, or create a new question when no match
-exists.
+A Streamlit app that matches questions from a source CSV against the
+[ISARIC ARC](https://github.com/ISARICResearch/ARC) reference catalog, and
+exports a REDCap-compatible data dictionary.
 
-## Run it
+Matching is powered by [`arc-hybrid-search`](https://github.com/catalinabustam/arc-hybrid-search),
+a standalone Python package that combines dense embeddings (ChromaDB) and
+sparse retrieval (BM25) via Reciprocal Rank Fusion. This app only handles
+the UI and decisions — all retrieval logic lives in that package.
+
+## Setup
 
 ```bash
 pip install -r requirements.txt
+```
 
-# One-off (or whenever the ARC catalog should be refreshed): downloads the
-# ARC catalog and builds the ChromaDB collections + BM25 index on disk.
+`requirements.txt` installs `arc-hybrid-search` directly from GitHub. To
+use a local development copy instead:
+
+```bash
+pip install -e ../arc-hybrid-search
+```
+
+Optionally, create a `.env` file with `DEEPL_API_KEY=...` to pre-fill the
+DeepL translation field.
+
+## Build the reference index (one-time)
+
+The app never builds the index itself — that's a separate manual step so
+starting the app is instant:
+
+```bash
 python build_index.py
+```
 
+This downloads the ARC catalog, builds the ChromaDB + BM25 index via
+`arc-hybrid-search`, and saves everything to `arc_data/`. Re-run it any
+time the ARC catalog should be refreshed, or from the sidebar's
+"Create/Recreate ARC index" button.
+
+## Run the app
+
+```bash
 streamlit run app.py
 ```
 
-Optionally, create a `.env` file with `DEEPL_API_KEY=...` — it's loaded
-automatically at startup and pre-fills the API key field in the sidebar.
+## Process
 
-## Reference catalog & search index
+1. **Upload** the source CSV and map its columns (question, section,
+   variable, answer type, etc.) to the REDCap data dictionary schema.
+2. **Translate** (optional) — DeepL or a local Ollama model translates
+   questions to English before matching.
+3. **Match, question by question** — `arc-hybrid-search` returns ranked ARC
+   candidates for each question. For each one, either:
+   - pick one or more matching ARC questions (optionally mixing which
+     fields come from ARC vs. the source CSV),
+   - create a new question (ARC-style variable name auto-generated), or
+   - ignore it (excluded from export).
+4. **Save/resume progress** — download a JSON snapshot at any point and
+   re-upload it later (with the same source CSV) to continue.
+5. **Export** — a plain CSV of every decision, plus a REDCap data
+   dictionary CSV in ARC form/section order, optionally translated via
+   ARC-Translations.
 
-Building the search index (downloading the ARC catalog, embedding it, and
-building the BM25 index) is a separate step from running the app — see
-`build_index.py`. It's not something the app does on your behalf, so
-starting the app is instant and never re-embeds the catalog.
-
-Run `python build_index.py` once, and again any time the ARC catalog should
-be refreshed. It downloads the catalog from:
-
-```
-https://raw.githubusercontent.com/ISARICResearch/ARC/refs/heads/main/ARC.csv
-```
-
-and persists everything the app needs to `chromadb_data/`, `arc_index_bm25/`,
-and `index_data/`. `app.py` only ever reads these back (see
-`vector_db.load_chromadb_collections` and `bm25.load_bm25_retriever`); if
-they're missing it shows an error telling you to run the build script.
-
-The catalog's columns (`Section`, `Question`, `Answer Options`, `Type`, ...)
-go through the same column mapping as the source CSV.
-
-## Translation (optional)
-
-If the CSV to process is in a different language than the reference catalog
-(English), you can enable automatic translation via
-[DeepL](https://www.deepl.com/pro-api) or a local [Ollama](https://ollama.com)
-model:
-
-- **DeepL** needs an API key (Free or Pro plan). Set it as the
-  `DEEPL_API_KEY` environment variable (e.g. in `.env`).
-- **Ollama** needs nothing but a running local instance — free, keyless,
-  and fully offline (no request ever leaves the machine). Set the
-  sidebar's "Ollama base URL" (default `http://localhost:11434`) and
-  "Ollama model" (default `llama3.2`) to match whatever you have pulled.
-
-Check **"Translate source CSV questions before comparing"**, pick a
-provider, and, if needed, the source language (target is fixed to English,
-matching the ARC catalog).
-
-When you start the comparison, the app translates all source questions
-(with caching to avoid repeat translations), stores the
-translated text alongside the original, and uses **the translated text** to
-compute similarity against the reference catalog. With Ollama, each
-question is translated in its own request rather than one big batch call —
-slower, but it guarantees every question gets translated correctly and
-independently, since a general-purpose local model can't reliably
-translate many texts in a single structured response the way DeepL's API
-can.
-
-For each question, the translated text is shown in an **editable box**. If
-the automatic translation isn't quite right, edit it and click
-**"🔄 Recalculate similarity"** — the suggested matches update immediately
-using your edited text instead of the automatic translation.
-
-## Usage flow
-
-1. **Upload files** (sidebar): upload only the CSV to process. Any separator
-   (`,`, `;`, tab) is supported.
-2. **Translation**: optional, see the section above.
-3. **Column mapping**: specify which column in the source CSV — and in the
-   downloaded ARC catalog — holds the question, section, answer type,
-   answer options, and ID. Common column names (`Question`, `Section`,
-   `Type`, `Answer Options`, `Variable`/`ID`) are preselected automatically
-   when present, so for the ARC catalog you usually don't need to touch
-   anything.
-4. **Start comparison**: navigate question by question with the
-   *Previous*/*Next* buttons. For each question you'll see the original text
-   and, if translation is enabled, the translated one too. The app suggests
-   the 5 most similar matches from the reference catalog (text similarity
-   using the translated text when available, plus a bonus for matching
-   sections). Pick a match, or the *"No match: create a new question"*
-   option — the new question's ID and text are generated by the fixed rules
-   in `rules.py`, and you can still tweak the section/text before saving.
-5. **Save and continue** records the decision and moves to the next
-   question. You can go back at any time to correct a decision.
-6. **Export**: download the final CSV with the original question, the
-   matched reference question (if any), the newly built question (if any),
-   and a `final_question` column that consolidates the result.
-
-## Saving and resuming progress
-
-`st.session_state` doesn't survive a page refresh — closing the tab or
-reloading loses every decision made so far. To avoid re-doing work:
-
-- While matching is in progress, click **"💾 Save progress"** in the
-  sidebar to download a small JSON file with every decision made so far
-  (status, matches, new-question fields, per-field overrides), where you
-  left off, and the name of the source CSV it was saved from.
-- To resume later, first re-upload the **same source CSV** under
-  **"1. Upload source CSV"** and redo the column mapping (common column
-  names are pre-selected automatically). Then upload the saved JSON under
-  **"2. Resume progress (optional)"** — if its filename doesn't match the
-  CSV you just uploaded, a warning is shown right away. Click
-  **"🔄 Resume from saved progress"** instead of "Start comparison".
-
-Only the decisions are saved — the source CSV and column mapping must be
-supplied again when resuming, since decisions are re-attached to the
-re-loaded source questions by position and to matched ARC rows by their
-catalog row index. If the ARC reference index was rebuilt (`build_index.py`
-run again) between saving and resuming, a warning is shown since some
-matches may not restore correctly and should be reviewed.
-
-## Creation rules (`rules.py`)
-
-There is no user-editable template for new questions. Instead, `rules.py`
-defines a **fixed** rule: when a question has no reference match, its new ID
-is built deterministically from short codes for its **section** and
-**answer type** (e.g. `NEW-DEMO-RADI-001`). The section and text are carried
-over from the source question unchanged.
-
-- `answer_type` comes from the optional column mapping (e.g. the ARC's
-  `Type` column).
-- If no `answer_type` column is mapped, it's inferred from the answer
-  options text (`infer_answer_type` in `rules.py`): boolean, choice,
-  numeric, or open.
-- To change the rule itself, edit `build_new_question` in `rules.py`
-  directly — no UI configuration is needed or exposed.
-
-## Architecture (clean code / design patterns)
+## Architecture
 
 | File                   | Responsibility                                                            |
 |------------------------|----------------------------------------------------------------------------|
-| `models.py`            | Domain entities (`Question`, `MatchCandidate`, `MatchDecision`).           |
-| `similarity.py`        | **Strategy** pattern for the similarity calculation (easy to swap).        |
-| `matching_service.py`  | Business logic: candidate search against the reference catalog.           |
-| `rules.py`             | Fixed rules for building a new question (section + answer type).          |
-| `csv_io.py`            | **Repository** pattern: CSV loading and export, isolated from the UI.      |
-| `progress_io.py`       | Save/restore an in-progress matching session as a JSON file, so a page refresh doesn't lose decisions. |
-| `translate.py`         | Translation clients (DeepL, Google Translate), isolated from the rest of the logic. |
-| `build_index.py`       | Standalone CLI: downloads the ARC catalog, builds the ChromaDB collections and BM25 index, persists them to disk. Run manually, not by the app. |
-| `vector_db.py`         | ChromaDB collection building (`build_index.py`) and loading (`app.py`).    |
-| `bm25.py`               | BM25 index building (`build_index.py`) and loading (`app.py`).            |
-| `app.py`               | Presentation layer (Streamlit): file upload, loading the pre-built index, and the matching flow. |
+| `arc-hybrid-search`    | External package: ARC catalog download, ChromaDB + BM25 indexing, hybrid retrieval. |
+| `build_index.py`       | CLI: builds the index via `arc-hybrid-search` and persists it to `arc_data/`. Run manually, not by the app. |
+| `matching_service.py`  | Thin adapter between the app's `Question` model and `arc-hybrid-search`'s retrieval API. |
+| `models.py`            | Domain entities (`Question`, `MatchDecision`, `StandaloneQuestion`, ...). |
+| `rules.py`             | Fixed rules for naming/building a new question (ARC naming convention). |
+| `redcap_validation.py` | Structural REDCap validation shared by the "create new" and mixed-match flows. |
+| `datadictionary.py`    | Builds the REDCap data dictionary CSV in ARC form/section/variable order. |
+| `csv_io.py`            | Loads source/reference CSVs into `Question`s; exports decisions to CSV.  |
+| `progress_io.py`       | Save/restore an in-progress session as JSON.                              |
+| `translate.py`         | DeepL / Ollama translation clients.                                       |
+| `translations.py`      | Applies ARC-Translations text to the exported data dictionary.           |
+| `app.py`               | Streamlit UI: upload, column mapping, matching flow, export.             |
 
-To change the similarity algorithm (e.g. to embeddings), just create a new
-class implementing `SimilarityStrategy` in `similarity.py` and assign it to
-`DEFAULT_STRATEGY`, without touching the rest of the code.
+To change the matching algorithm, edit `arc-hybrid-search` itself — this
+app only consumes its public API via `matching_service.py`.
