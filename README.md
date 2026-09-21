@@ -25,25 +25,17 @@ pip install -e ../arc-hybrid-search
 Optionally, create a `.env` file with `DEEPL_API_KEY=...` to pre-fill the
 DeepL translation field.
 
-## Build the reference index (one-time)
-
-The app never builds the index itself — that's a separate manual step so
-starting the app is instant:
-
-```bash
-python build_index.py
-```
-
-This downloads the ARC catalog, builds the ChromaDB + BM25 index via
-`arc-hybrid-search`, and saves everything to `arc_data/`. Re-run it any
-time the ARC catalog should be refreshed, or from the sidebar's
-"Create/Recreate ARC index" button.
-
 ## Run the app
 
 ```bash
 streamlit run app.py
 ```
+## Build the reference index (one-time)
+
+To create or recreate the index use the sidebar's "Create/Recreate ARC index" button.
+
+This downloads the ARC catalog, builds the ChromaDB + BM25 index via
+`arc-hybrid-search`, and saves everything to `arc_data/`. 
 
 ## Process
 
