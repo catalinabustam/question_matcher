@@ -110,10 +110,44 @@ def _standalone_export_row(
     }
 
 
+def _original_export_row(decision: MatchDecision) -> dict:
+    """One export-table row for a question kept exactly as in the source."""
+    source = decision.source
+    return {
+        "source_question_index": str(source.row_index + 1),
+        "original_form_name": source.form_name or "",
+        "original_section": source.section,
+        "original_topic": source.topic or "",
+        "original_answer_type": source.field_type or "",
+        "original_question": source.question,
+        "translated_question": source.translated_question or "",
+        "edited_translated_question": decision.edited_translated_question or "",
+        "original_options": source.options,
+        "status": MatchStatus.ORIGINAL.value,
+        "matched_reference_id": "",
+        "matched_reference_question": "",
+        "final_form_name": source.form_name or "",
+        "final_matched_question": source.question,
+        "final_matched_options": source.options or "",
+        "final_matched_field_type": source.field_type or "",
+        "final_matched_validation": source.validation or "",
+        "question_source": "source",
+        "options_source": "source",
+        "type_source": "source",
+        "validation_source": "source",
+        "section_source": "source",
+        "form_name_source": "source",
+        "final_question": source.question,
+    }
+
+
 def _decision_export_rows(
     decision: MatchDecision, rename_map: dict[str, str]
 ) -> list[dict]:
     rows: list[dict] = []
+    if decision.status == MatchStatus.ORIGINAL:
+        rows.append(_original_export_row(decision))
+
     if decision.status in (MatchStatus.MATCHED, MatchStatus.MATCHED_CREATED):
         for matched in decision.matched_questions:
             resolved = {
