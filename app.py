@@ -26,6 +26,7 @@ from datadictionary import (
 )
 from matching_service import QuestionMatchingService, definition_with_options
 from models import (
+    _DECISION_STR_FIELDS,
     MatchDecision,
     MatchStatus,
     Question,
@@ -55,10 +56,19 @@ st.set_page_config(page_title="Question Matcher", layout="wide")
 NONE_OPTION = "— None —"
 CREATE_NEW_LABEL = "➕ Create a new question"
 IGNORE_LABEL = "🚫 Ignore this question (do not include in export)"
+ORIGINAL_LABEL = (
+    "📄 Keep as original (the source already has every data dictionary field)"
+)
+
+# Every `new_*` field a created question stores on its `MatchDecision`.
+_NEW_FIELD_NAMES = tuple(
+    name for name in _DECISION_STR_FIELDS if name.startswith("new_")
+)
 
 # Pagination over the candidate list: show this many at first, grow by this
 # many per "Load more" click, up to this hard cap.
 CANDIDATES_MAX = 100
+ARC_DATA_URL="https://raw.githubusercontent.com/ISARICResearch/ARC/refs/heads/main/ARC.csv"
 
 load_dotenv(override=True)
 
@@ -101,7 +111,7 @@ def _render_index_controls() -> None:
             with st.spinner(
                 "Recreating ARC index..." if index_exists else "Creating ARC index..."
             ):
-                build_index(data_dir="./arc_data")
+                build_index(data_dir="./arc_data", arc_url=ARC_DATA_URL)
             _load_index.clear()
             st.sidebar.success("ARC index is ready.")
             st.rerun()
@@ -178,9 +188,11 @@ def _on_status_change(idx: int, trigger: str, num_candidates: int):
     """Callback triggered when Ignore or Create New checkbox state changes."""
     ignore_key = f"ignore_{idx}"
     create_new_key = f"create_new_{idx}"
+    original_key = f"original_{idx}"
 
     if trigger == "ignore" and st.session_state.get(ignore_key):
         st.session_state[create_new_key] = False
+        st.session_state[original_key] = False
         
         # Clear candidate selections
         for i in range(num_candidates):
@@ -196,6 +208,12 @@ def _on_status_change(idx: int, trigger: str, num_candidates: int):
 
     elif trigger == "create_new" and st.session_state.get(create_new_key):
         st.session_state[ignore_key] = False
+        st.session_state[original_key] = False
+
+    elif trigger == "original" and st.session_state.get(original_key):
+        st.session_state[ignore_key] = False
+        st.session_state[create_new_key] = False
+        _deselect_all_candidates(idx, num_candidates)
 
 
 
@@ -203,8 +221,9 @@ def _on_candidate_change(idx: int, candidate_key: str, candidate):
     """Callback triggered when any candidate checkbox state changes."""
     ignore_key = f"ignore_{idx}"
 
-    # If any candidate gets checked, clear Ignore and Create New
+    # If any candidate gets checked, clear Ignore and Keep as original
     st.session_state[ignore_key] = False
+    st.session_state[f"original_{idx}"] = False
 
     if not st.session_state.get(candidate_key):
         return
@@ -229,15 +248,27 @@ def _deselect_all_candidates(idx: int, num_candidates: int):
 def _navigable_index(current: int, direction: int, skip_matched: bool) -> int | None:
     """Next question index stepping by `direction` (+1 or -1) from `current`.
 
-    When `skip_matched` is set, MATCHED decisions are stepped over so
-    Previous/Next only stop on questions still needing review. Returns
-    None if there's nowhere left to go in that direction.
+    When `skip_matched` is set, matched and original questions are stepped over —
+    including pending ones with an exact ARC variable-name match, which
+    the progress counter already reports as matched — so Previous/Next
+    only stop on questions still needing review. When it is not set,
+    every question is reachable. Returns None if there's nowhere left to
+    go in that direction.
     """
     decisions = st.session_state.decisions
     total = len(decisions)
     idx = current + direction
+    if not skip_matched:
+        return idx if 0 <= idx < total else None
+
+    exact_matches = _pending_exact_variable_matches()
+    matched_statuses = (
+        MatchStatus.MATCHED,
+        MatchStatus.MATCHED_CREATED,
+        MatchStatus.ORIGINAL,
+    )
     while 0 <= idx < total:
-        if not skip_matched or decisions[idx].status != MatchStatus.MATCHED:
+        if decisions[idx].status not in matched_statuses and idx not in exact_matches:
             return idx
         idx += direction
     return None
@@ -308,11 +339,16 @@ def _existing_variable_ids(exclude: MatchDecision | None = None) -> set[str]:
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
         and d.new_id and d is not exclude
     }
+    original_ids = {
+        d.source.variable
+        for d in st.session_state.get("decisions", [])
+        if d.status == MatchStatus.ORIGINAL and d.source.variable and d is not exclude
+    }
     standalone_ids = {
         question.new_id or question.st_id
         for question in st.session_state.get("standalone_questions", [])
     }
-    return arc_ids | created_ids | standalone_ids
+    return arc_ids | created_ids | original_ids | standalone_ids
 
 
 def _remember_section_header(section: str | None) -> None:
@@ -369,9 +405,16 @@ def _apply_exact_variable_autoskip() -> None:
         _remember_section_header(matched.section)
 
 
+def _clear_new_fields(decision: MatchDecision) -> None:
+    """Reset every field that only a created question uses."""
+    for name in _NEW_FIELD_NAMES:
+        setattr(decision, name, "")
+
+
 def _save_decision(
     idx: int, selected_labels: list[str], candidates, new_section: str,
     new_text: str, create_new: bool = False, ignore: bool = False,
+    original: bool = False,
     new_field_name: str = "", new_form_name: str = "", new_field_type: str = "",
 
     new_variable_name_source: str = "", new_text_source: str = "",
@@ -459,23 +502,15 @@ def _save_decision(
         decision.status = MatchStatus.IGNORED
         decision.matched = None
         decision.matches = []
-        decision.new_id = decision.new_section = decision.new_text = ""
-        decision.new_variable_name_source = ""
-        decision.new_text_source = ""
-        decision.new_form_name = decision.new_field_type = decision.new_options = ""
-        decision.new_field_note = decision.new_validation_type = (
-            decision.new_validation_min
-        ) = ""
-        decision.new_validation_max = decision.new_identifier = (
-            decision.new_branching_logic
-        ) = ""
-        decision.new_required_field = decision.new_custom_alignment = (
-            decision.new_field_annotation
-        ) = ""
-        decision.new_matrix_group_name = decision.new_matrix_ranking = (
-            decision.new_question_number
-        ) = ""
+        _clear_new_fields(decision)
         decision.field_overrides = {}
+    elif original:
+        decision.status = MatchStatus.ORIGINAL
+        decision.matched = None
+        decision.matches = []
+        _clear_new_fields(decision)
+        decision.field_overrides = {}
+        _remember_section_header(decision.source.section)
     else:
         matched_questions = [
             c.question
@@ -488,22 +523,7 @@ def _save_decision(
         decision.status = MatchStatus.MATCHED
         decision.matched = matched_questions[0] if matched_questions else None
         decision.matches = matched_questions
-        decision.new_id = decision.new_section = decision.new_text = ""
-        decision.new_variable_name_source = ""
-        decision.new_text_source = ""
-        decision.new_form_name = decision.new_field_type = decision.new_options = ""
-        decision.new_field_note = decision.new_validation_type = (
-            decision.new_validation_min
-        ) = ""
-        decision.new_validation_max = decision.new_identifier = (
-            decision.new_branching_logic
-        ) = ""
-        decision.new_required_field = decision.new_custom_alignment = (
-            decision.new_field_annotation
-        ) = ""
-        decision.new_matrix_group_name = decision.new_matrix_ranking = (
-            decision.new_question_number
-        ) = ""
+        _clear_new_fields(decision)
         decision.field_overrides = (
             field_overrides or {} if len(matched_questions) == 1 else {}
         )
@@ -747,6 +767,7 @@ def _render_progress():
         for d in decisions
         if d.status in (MatchStatus.CREATED, MatchStatus.MATCHED_CREATED)
     ) + len(st.session_state.get("standalone_questions", []))
+    original = sum(1 for d in decisions if d.status == MatchStatus.ORIGINAL)
     ignored = sum(1 for d in decisions if d.status == MatchStatus.IGNORED)
     # True pending (still PENDING status) minus the ones already counted
     # under "Matched" above, so the metrics add up to `total`.
@@ -756,7 +777,7 @@ def _render_progress():
     )
     resolved = total - pending
 
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("Total", total)
     cols[1].metric(
         "Matched",
@@ -765,8 +786,9 @@ def _render_progress():
         "even if 'Auto-match exact ARC variables' hasn't been turned on yet.",
     )
     cols[2].metric("New", created)
-    cols[3].metric("Ignored", ignored)
-    cols[4].metric("Pending", pending)
+    cols[3].metric("Original", original)
+    cols[4].metric("Ignored", ignored)
+    cols[5].metric("Pending", pending)
     st.progress(resolved / total if total else 0)
 
 
@@ -780,8 +802,8 @@ def _render_question_flow():
         "Skip already-matched questions when navigating with Previous/Next",
         key="skip_matched_in_nav",
         help="When checked, Previous/Next jump over questions already "
-        "marked as matched, so you only step through questions still "
-        "needing review.",
+        "marked as matched or original, so you only step through "
+        "questions still needing review.",
     )
 
     st.markdown(f"**Question {idx + 1} of {total}**")
@@ -896,11 +918,21 @@ def _render_question_flow():
             MatchStatus.MATCHED_CREATED,
         )
 
+    original_key = f"original_{idx}"
+    if original_key not in st.session_state:
+        st.session_state[original_key] = decision.status == MatchStatus.ORIGINAL
+
     ignore = st.checkbox(
         IGNORE_LABEL,
         key=ignore_key,
         on_change=_on_status_change,
         args=(idx, "ignore", num_candidates),
+    )
+    original = st.checkbox(
+        ORIGINAL_LABEL,
+        key=original_key,
+        on_change=_on_status_change,
+        args=(idx, "original", num_candidates),
     )
 
     selected_match_labels = []
@@ -968,6 +1000,7 @@ def _render_question_flow():
     new_text_source = ""
     variable_name_conflict = False
     create_new_errors: list[str] = []
+    original_errors: list[str] = []
 
     if create_new:
         preview_seq = (
@@ -1340,7 +1373,7 @@ def _render_question_flow():
             },
             existing_ids=_existing_variable_ids(exclude=decision),
             available_field_types=field_type_options,
-            require_form_and_section=True,
+            require_form=True,
         )
         # The variable-name conflict/format problem already gets its own
         # inline st.error above — skip it here to avoid showing it twice.
@@ -1353,12 +1386,44 @@ def _render_question_flow():
     elif ignore:
         st.caption("This question will be excluded from the final export.")
 
+    elif original:
+        original_errors, original_warnings = validate_record(
+            {
+                "variable": source.variable or "",
+                "form_name": source.form_name or "",
+                "section": source.section or "",
+                "field_type": source.field_type or "",
+                "label": source.question,
+                "choices": source.options or "",
+                "validation_type": source.validation or "",
+                "validation_min": source.validation_min or "",
+                "validation_max": source.validation_max or "",
+                "branching_logic": source.branching_logic or "",
+            },
+            existing_ids=_existing_variable_ids(exclude=decision),
+            available_field_types=available_field_types(st.session_state.reference_df),
+            require_form=True,
+        )
+        st.caption(
+            "This question will be exported exactly as it is in the source CSV."
+        )
+        arc_variables = set(st.session_state.arc_catalog_df["Variable"].astype(str))
+        if source.variable and source.variable in arc_variables:
+            st.info(
+                "This variable already exists in the ARC catalog — match it "
+                "instead of keeping it as original."
+            )
+        for err in original_errors:
+            st.error(err)
+        for warn in original_warnings:
+            st.warning(warn)
+
     mixed_match_errors: list[str] = []
     field_overrides: dict[str, str] = dict(decision.field_overrides)
 
     # Check for variable name conflicts with other decisions for matched questions
     matched_variable_conflicts: list[str] = []
-    if not create_new and not ignore and selected_match_labels:
+    if not create_new and not ignore and not original and selected_match_labels:
         for label in selected_match_labels:
             candidate = next(
                 c
@@ -1374,7 +1439,7 @@ def _render_question_flow():
                     f"Variable '{candidate.question.variable}' is already matched to source question {existing_q_num}"
                 )
 
-    if not create_new and not ignore and selected_match_labels:
+    if not create_new and not ignore and not original and selected_match_labels:
         # For multiple matches, apply the same field overrides to all matched questions
         matched_questions = [
             c.question
@@ -1501,26 +1566,32 @@ def _render_question_flow():
     for conflict in matched_variable_conflicts:
         st.error(conflict)
 
-    can_save = bool(ignore) or (
-        not ignore
-        and not mixed_match_errors
-        and not matched_variable_conflicts
-        and (
-            bool(selected_match_labels)
-            if not create_new
-            else not (variable_name_conflict or bool(create_new_errors))
+    if ignore:
+        can_save = True
+    elif original:
+        can_save = not original_errors
+    else:
+        can_save = (
+            not mixed_match_errors
+            and not matched_variable_conflicts
+            and (
+                bool(selected_match_labels)
+                if not create_new
+                else not (variable_name_conflict or bool(create_new_errors))
+            )
         )
-    )
     if not can_save:
         st.caption(
-            "Select one or more candidates, enter a section for the new question, or ignore this row."
+            "Select one or more candidates, enter a section for the new question, "
+            "keep it as original, or ignore this row."
         )
 
     def save_current_decision() -> None:
         if can_save:
             _save_decision(
                 idx, selected_match_labels, candidates, new_section, new_text,
-                create_new=create_new, ignore=ignore, new_field_name=new_field_name,
+                create_new=create_new, ignore=ignore, original=original,
+                new_field_name=new_field_name,
                 new_variable_name_source=variable_name_source,
                 new_text_source=new_text_source,
                 new_form_name=new_form_name, new_field_type=new_field_type,
@@ -1543,9 +1614,21 @@ def _render_question_flow():
     prev_target = _navigable_index(idx, -1, skip_matched_nav)
     next_target = _navigable_index(idx, 1, skip_matched_nav)
 
+    def save_on_navigate() -> None:
+        # While reviewing, passing through a pending question must not
+        # silently accept its pre-selected top candidate as a match.
+        if (
+            skip_matched_nav
+            and decision.status == MatchStatus.PENDING
+            and not create_new
+            and not original
+        ):
+            return
+        save_current_decision()
+
     nav_cols = st.columns([1, 1, 1, 5])
     if nav_cols[0].button("⬅ Previous", disabled=prev_target is None):
-        save_current_decision()
+        save_on_navigate()
         st.session_state.current_idx = prev_target
         st.rerun()
     if nav_cols[1].button("Save and continue ➡", type="primary", disabled=not can_save):
@@ -1554,7 +1637,7 @@ def _render_question_flow():
             st.session_state.current_idx = next_target
         st.rerun()
     if nav_cols[2].button("Next ➡", disabled=next_target is None):
-        save_current_decision()
+        save_on_navigate()
         st.session_state.current_idx = next_target
         st.rerun()
 
@@ -1796,7 +1879,7 @@ def _render_standalone_questions():
             },
             existing_ids=_existing_variable_ids(),
             available_field_types=field_type_options,
-            require_form_and_section=True,
+            require_form=True,
         )
         for err in standalone_errors:
             if not err.startswith("Variable/Field Name"):

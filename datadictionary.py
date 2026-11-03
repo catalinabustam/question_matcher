@@ -402,6 +402,49 @@ def _decision_created_frame(decision: MatchDecision, lists_path: str) -> pd.Data
     return built
 
 
+def _decision_original_frame(decision: MatchDecision, lists_path: str) -> pd.DataFrame:
+    """REDCap row for an ORIGINAL decision: the source question as it is."""
+    if decision.status != MatchStatus.ORIGINAL:
+        return pd.DataFrame(columns=_REDCAP_COLUMNS)
+
+    source = decision.source
+    source_row = pd.DataFrame(
+        [
+            {
+                "Form": source.form_name or "",
+                "Section": source.section or "",
+                "Variable": source.variable,
+                "Type": source.field_type or "",
+                "Question": source.question,
+                "Answer Options": source.options or "",
+                "Validation": source.validation or "",
+                "Minimum": source.validation_min or "",
+                "Maximum": source.validation_max or "",
+                "Skip Logic": source.branching_logic or "",
+            }
+        ]
+    )
+    built = _build_core(source_row, lists_path)
+    if built.empty:
+        return built
+
+    extra_columns = {
+        "Field Note": source.field_note,
+        "Identifier?": source.identifier,
+        "Required Field?": source.required_field,
+        "Field Annotation": source.field_annotation,
+        "Matrix Group Name": source.matrix_group,
+        "Matrix Ranking?": source.matrix_ranking,
+        "Question Number (surveys only)": source.question_number,
+    }
+    for column, value in extra_columns.items():
+        built.loc[built.index[0], column] = value or ""
+    if source.custom_alignment:
+        built.loc[built.index[0], "Custom Alignment"] = source.custom_alignment
+
+    return built
+
+
 def _standalone_created_frame(
     question: StandaloneQuestion, lists_path: str
 ) -> pd.DataFrame:
@@ -473,13 +516,15 @@ def _ordered_dictionary_rows(
                 MatchStatus.MATCHED,
                 MatchStatus.CREATED,
                 MatchStatus.MATCHED_CREATED,
+                MatchStatus.ORIGINAL,
             ):
                 continue
             matched_frame = _decision_matched_frame(decision, arc_catalog, lists_path)
             created_frame = _decision_created_frame(decision, lists_path)
-            for frame in (matched_frame, created_frame):
+            original_frame = _decision_original_frame(decision, lists_path)
+            for frame in (matched_frame, created_frame, original_frame):
                 if not frame.empty:
-                    if frame is created_frame and most_recent_variable:
+                    if frame is not matched_frame and most_recent_variable:
                         frame = frame.copy()
                         frame["_placement_anchor"] = most_recent_variable
                     frames.append(frame)

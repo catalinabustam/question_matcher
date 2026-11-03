@@ -15,6 +15,7 @@ class MatchStatus(str, Enum):
     CREATED = "created"
     MATCHED_CREATED = "matched and created"
     IGNORED = "ignored"  # user chose not to include this question in the export
+    ORIGINAL = "original"  # source question already has every field; kept as is
 
 
 @dataclass(frozen=True)
